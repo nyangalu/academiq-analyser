@@ -1,7 +1,8 @@
 import { useState, useRef, useCallback, useEffect } from "react";
 import React from "react";
-import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
-import { getDatabase, ref, onValue, set, update, remove, get } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js";
+import mammoth from "mammoth";
+import { initializeApp } from "firebase/app";
+import { getDatabase, ref, onValue, set, update, remove, get } from "firebase/database";
 
 // ═══════════════════════════════════════════════════════════════════════
 // FIREBASE CONFIG
@@ -117,17 +118,23 @@ ${student.rubric ? `\nRUBRIC:\n${student.rubric}\n` : ""}
 ${supNotes ? `\nSUPERVISOR NOTES:\n${supNotes}\n` : ""}
 PROJECT TEXT:
 ---
-${text.slice(0, 28000)}
+${text.slice(0, 14000)}
 ---
 Return ONLY valid JSON:
 {"overallScore":<0-100>,"overallGrade":"<F|D|C|B|A|A+>","overallVerdict":"<2-3 sentences>","supervisorDecision":"<APPROVED|MINOR REVISIONS|MAJOR REVISIONS|NOT APPROVED>","sections":[{"name":"<n>","score":<0-100>,"grade":"<F|D|C|B|A>","strengths":["<s>"],"weaknesses":["<w>"],"supervisorInstruction":"<inst>"}],"criticalIssues":["<i>"],"positives":["<p>"],"priorityActions":[{"priority":"Critical|Serious|Important|Minor","action":"<a>"}],"disciplinaryAssessment":"<para>","ecsa_ga_notes":"<para>"}`;
-  const r = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ model: "claude-sonnet-4-6", max_tokens: 4000, system: sys, messages: [{ role: "user", content: prompt }] }),
+  const r = await fetch("/api/analyse", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ prompt, system: sys, maxTokens: 8000 }),
   });
+  if (!r.ok) { const e=await r.json().catch(()=>({})); throw new Error(e.error||"Server error "+r.status); }
   const d = await r.json();
-  const raw = (d.content || []).map(b => b.text || "").join("").replace(/```json|```/g, "").trim();
-  return JSON.parse(raw);
+  const raw = (d.text||"").replace(/```json|```/g,"").trim();
+  try { return JSON.parse(raw); } catch(e) {
+    const repairs=[raw+'"]}',raw+'"}]}',raw+'"]}]}',raw.replace(/,\s*$/,"")+"}}}",raw.replace(/,\s*$/,"")+"}}}}"];
+    for(const a of repairs){try{return JSON.parse(a);}catch(e2){}}
+    throw new Error("Document may be too large. Try submitting one chapter at a time (under 500KB recommended).");
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -548,7 +555,7 @@ function Modal({title,onClose,children,maxW=620}){
 
 function StudentFormModal({db,existing,supervisorId,onClose,showToast}){
   const isNew=!existing;
-  const[f,setF]=useState({surname:existing?.surname||"",initials:existing?.initials||"",number:existing?.number||"",level:existing?.level||"BEng",fields:existing?.fields||[],strictness:existing?.strictness||"strict",rubric:existing?.rubric||"",extraPrompt:existing?.extraPrompt||"",password:existing?.password||"",securityQ:existing?.securityQ||null,supervisorId:existing?.supervisorId||supervisorId||null});
+  const[f,setF]=useState({surname:existing?.surname||"",initials:existing?.initials||"",number:existing?.number||"",institution:existing?.institution||"",level:existing?.level||"BEng",fields:existing?.fields||[],strictness:existing?.strictness||"strict",rubric:existing?.rubric||"",extraPrompt:existing?.extraPrompt||"",password:existing?.password||"",securityQ:existing?.securityQ||null,supervisorId:existing?.supervisorId||supervisorId||null,coSupervisorIds:existing?.coSupervisorIds||[]});
   const[sqQ,setSqQ]=useState(existing?.securityQ?.question||SECURITY_QUESTIONS[0]);
   const[sqA,setSqA]=useState("");
   const[err,setErr]=useState("");
@@ -556,6 +563,7 @@ function StudentFormModal({db,existing,supervisorId,onClose,showToast}){
   const save=()=>{
     setErr("");
     if(!f.surname||!f.initials||!f.number)return setErr("Surname, initials and number required.");
+    if(!f.institution)return setErr("Institution is required.");
     if(f.fields.length===0)return setErr("Select at least one field.");
     const dup=db.students.find(s=>s.number===f.number.trim()&&s.id!==existing?.id);
     if(dup)return setErr("Student number already registered.");
@@ -576,6 +584,7 @@ function StudentFormModal({db,existing,supervisorId,onClose,showToast}){
         <div><label style={LS}>Initials *</label><input value={f.initials} onChange={up("initials")} placeholder="DA" style={IS}/></div>
         <div><label style={LS}>Student Number *</label><input value={f.number} onChange={up("number")} placeholder="38045869" disabled={!isNew} style={{...IS,background:!isNew?"#f8fafc":"white"}}/></div>
         <div><label style={LS}>Level *</label><select value={f.level} onChange={up("level")} style={IS}>{LEVELS.map(l=><option key={l}>{l}</option>)}</select></div>
+        <div style={{gridColumn:"1 / -1"}}><label style={LS}>Institution *</label><input value={f.institution} onChange={up("institution")} placeholder="e.g. Cape Peninsula University of Technology" style={IS}/></div>
       </div>
       <div style={{marginBottom:11}}>
         <label style={LS}>Assign to Supervisor</label>
@@ -583,6 +592,21 @@ function StudentFormModal({db,existing,supervisorId,onClose,showToast}){
           <option value="">— Unassigned —</option>
           {db.supervisors.map(s=><option key={s.id} value={s.id}>{s.name}</option>)}
         </select>
+      </div>
+      <div style={{marginBottom:11}}>
+        <label style={LS}>Co-Supervisors (optional — select one or more)</label>
+        <div style={{display:"flex",flexDirection:"column",gap:5}}>
+          {db.supervisors.filter(s=>s.id!==f.supervisorId).map(s=>{
+            const checked=(f.coSupervisorIds||[]).includes(s.id);
+            return(
+              <div key={s.id} onClick={()=>setF(p=>({...p,coSupervisorIds:checked?p.coSupervisorIds.filter(x=>x!==s.id):[...(p.coSupervisorIds||[]),s.id]}))} style={{display:"flex",alignItems:"center",gap:9,padding:"7px 10px",borderRadius:8,border:`1.5px solid ${checked?"#3b82f6":"#e2e8f0"}`,cursor:"pointer",background:checked?"#eff6ff":"white"}}>
+                <div style={{width:16,height:16,borderRadius:4,border:`2px solid ${checked?"#3b82f6":"#cbd5e1"}`,background:checked?"#3b82f6":"white",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}>{checked&&<Ic n="check" size={9} c="white"/>}</div>
+                <span style={{fontSize:13,fontWeight:checked?600:400}}>{s.name}</span>
+              </div>
+            );
+          })}
+          {db.supervisors.filter(s=>s.id!==f.supervisorId).length===0&&<div style={{fontSize:13,color:"#94a3b8"}}>No other supervisors registered.</div>}
+        </div>
       </div>
       <div style={{marginBottom:11}}>
         <label style={LS}>Engineering Field(s) *</label>
@@ -618,6 +642,590 @@ function StudentFormModal({db,existing,supervisorId,onClose,showToast}){
       </div>
       <Err msg={err}/>
       <div style={{display:"flex",gap:8,marginTop:12}}><button onClick={save} style={BP}>{isNew?"Register":"Save"} Student</button><button onClick={onClose} style={BS}>Cancel</button></div>
+    </Modal>
+  );
+}
+
+
+// ═══════════════════════════════════════════════════════════════════════
+// PDF TEXT EXTRACTION via PDF.js CDN
+// ═══════════════════════════════════════════════════════════════════════
+
+async function extractPdfText(file) {
+  // Dynamically load PDF.js from CDN
+  if (!window.pdfjsLib) {
+    await new Promise((resolve, reject) => {
+      const script = document.createElement("script");
+      script.src = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js";
+      script.onload = resolve;
+      script.onerror = reject;
+      document.head.appendChild(script);
+    });
+    window.pdfjsLib.GlobalWorkerOptions.workerSrc =
+      "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+  }
+  const buf = await file.arrayBuffer();
+  const pdf = await window.pdfjsLib.getDocument({ data: buf }).promise;
+  const maxPages = Math.min(pdf.numPages, 40); // limit to 40 pages
+  let text = "";
+  for (let i = 1; i <= maxPages; i++) {
+    const page = await pdf.getPage(i);
+    const content = await page.getTextContent();
+    text += content.items.map(item => item.str).join(" ") + "\n";
+  }
+  return text;
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// CITATION STYLES
+// ═══════════════════════════════════════════════════════════════════════
+
+const CITATION_STYLES = [
+  {id:"apa",    label:"APA 7th Edition"},
+  {id:"ieee",   label:"IEEE"},
+  {id:"harvard",label:"Harvard"},
+  {id:"mla",    label:"MLA 9th Edition"},
+  {id:"chicago",label:"Chicago 17th Edition"},
+  {id:"vancouver",label:"Vancouver"},
+];
+
+// ═══════════════════════════════════════════════════════════════════════
+// EXTENDED REVIEW API CALL
+// ═══════════════════════════════════════════════════════════════════════
+
+async function analyzeDocExtended(text, student, citationStyle, supNotes) {
+  const fields = (student.fields||[]).join(", ")||"Engineering";
+  const lvMap = {Diploma:"National Diploma","Advanced Diploma":"Advanced Diploma",PGDip:"Postgraduate Diploma",BEng:"Bachelor of Engineering",MEng:"Master of Engineering",PhD:"Doctor of Philosophy"};
+  const level = lvMap[student.level]||student.level;
+  const styleLabel = CITATION_STYLES.find(s=>s.id===citationStyle)?.label||citationStyle;
+
+  const prompt = `You are an expert academic editor and plagiarism/AI detection specialist conducting a comprehensive editorial review of a ${level} engineering project in ${fields} for ${student.initials} ${student.surname} (${student.number}) at a South African university.
+
+Citation style declared: ${styleLabel}
+${supNotes?`Supervisor notes: ${supNotes}`:""}
+
+PROJECT TEXT (full):
+---
+${text.slice(0,14000)}
+---
+
+Conduct the following comprehensive review and return ONLY valid JSON (no markdown):
+
+{
+  "languageReview": {
+    "overallLanguageScore": <0-100>,
+    "spellingErrors": [{"original":"<wrong>","correction":"<right>","context":"<surrounding text snippet>"}],
+    "grammarErrors": [{"issue":"<description>","location":"<text snippet>","suggestion":"<corrected version>"}],
+    "styleIssues": [{"type":"<Wordiness|Passive voice|Ambiguity|etc>","location":"<text snippet>","suggestion":"<improvement>"}],
+    "readabilityScore": <0-100>,
+    "readabilityComment": "<paragraph>"
+  },
+  "literatureReview": {
+    "funnelApproachScore": <0-100>,
+    "funnelApproachComment": "<paragraph — does it move from broad to specific?>",
+    "relevanceScore": <0-100>,
+    "relevanceComment": "<paragraph — are sources relevant to the topic?>",
+    "criticalAnalysisScore": <0-100>,
+    "criticalAnalysisComment": "<paragraph — does student critically analyse or just summarise?>",
+    "flowScore": <0-100>,
+    "flowComment": "<paragraph — does literature review flow logically?>",
+    "gaps": ["<gap or missing aspect>"],
+    "strengths": ["<strength>"]
+  },
+  "citationReview": {
+    "declaredStyle": "${styleLabel}",
+    "overallCitationScore": <0-100>,
+    "inTextCitations": [
+      {
+        "citation": "<exact in-text citation as it appears>",
+        "location": "<surrounding sentence>",
+        "isCorrect": <true|false>,
+        "issue": "<null or description of problem>",
+        "correction": "<null or corrected version>",
+        "referenceKey": "<surname/number that links to references list>",
+        "searchQuery": "<best Google Scholar search query to find this source>"
+      }
+    ],
+    "referenceList": [
+      {
+        "key": "<surname or number>",
+        "fullReference": "<full reference as it appears in document>",
+        "isCorrect": <true|false>,
+        "issue": "<null or formatting problem>",
+        "correction": "<null or corrected version>",
+        "searchQuery": "<Google Scholar search query>",
+        "doiOrUrl": "<DOI or URL if found in text, else null>"
+      }
+    ],
+    "missingReferences": ["<citation that appears in text but not in reference list>"],
+    "orphanedReferences": ["<reference in list but not cited in text>"],
+    "citationIssuesSummary": "<paragraph>"
+  },
+  "aiDetection": {
+    "estimatedAiPercentage": <0-100>,
+    "confidence": "<Low|Medium|High>",
+    "aiSections": [
+      {
+        "section": "<section name or heading>",
+        "excerpt": "<first 120 chars of suspected AI text>",
+        "likelihood": "<Low|Medium|High>",
+        "indicators": ["<indicator 1>","<indicator 2>"]
+      }
+    ],
+    "humanSections": ["<section or aspect that reads as genuinely human-written>"],
+    "aiComment": "<overall paragraph about AI usage patterns detected>"
+  },
+  "informationFlow": {
+    "overallFlowScore": <0-100>,
+    "sectionFlow": [
+      {"section":"<name>","flowScore":<0-100>,"comment":"<brief>","issue":"<null or problem>"}
+    ],
+    "transitionQuality": "<Poor|Fair|Good|Excellent>",
+    "logicalProgressionComment": "<paragraph>",
+    "recommendations": ["<recommendation>"]
+  },
+  "editorialSummary": "<2-3 paragraph overall editorial verdict>",
+  "priorityCorrections": [
+    {"priority":"Critical|Serious|Important|Minor","type":"<Language|Citation|AI|Flow|LitReview>","action":"<specific action required>"}
+  ]
+}`;
+
+  const r = await fetch("/api/analyse",{
+    method:"POST",
+    headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({prompt, system:"You are an expert academic editor, citation specialist, and AI-content detection analyst. Be thorough, specific and precise. Always return valid JSON only.", maxTokens:8000}),
+  });
+  const d = await r.json();
+  const raw=(d.content||[]).map(b=>b.text||"").join("").replace(/```json|```/g,"").trim();
+  try { return JSON.parse(raw); } catch(e) {
+    const repairs=[raw+'"]}',raw+'"}]}',raw+'"]}]}',raw.replace(/,\s*$/,"")+"}}}}}",raw.replace(/,\s*$/,"")+"}}}}}}"];
+    for(const a of repairs){try{return JSON.parse(a);}catch(e2){}}
+    throw new Error("Document too large for extended analysis. Submit one chapter at a time.");
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// EXTENDED FEEDBACK MODAL
+// ═══════════════════════════════════════════════════════════════════════
+
+function ExtendedFeedbackModal({submission,students,onClose}){
+  const[tab,setTab]=useState("language");
+  const r=submission.extendedResult;
+  const st=students.find(s=>s.id===submission.studentId)||{};
+  if(!r)return null;
+
+  const tabs=[
+    {id:"language",  label:"Language & Grammar"},
+    {id:"litreview", label:"Literature Review"},
+    {id:"citations", label:"Citations & References"},
+    {id:"ai",        label:"AI Detection"},
+    {id:"flow",      label:"Information Flow"},
+    {id:"summary",   label:"Summary"},
+  ];
+
+  const ScoreBadge=({score,size=22})=>(
+    <span style={{fontSize:size,fontWeight:900,color:sc(score)}}>{score}<span style={{fontSize:size*0.5,color:"#94a3b8"}}>/100</span></span>
+  );
+
+  const buildScholarUrl=(query)=>`https://scholar.google.com/scholar?q=${encodeURIComponent(query)}`;
+
+  return(
+    <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.65)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:1100,padding:"1rem"}}>
+      <div style={{background:"white",borderRadius:20,width:"100%",maxWidth:860,maxHeight:"93vh",overflow:"auto",boxShadow:"0 30px 80px rgba(0,0,0,.4)",display:"flex",flexDirection:"column"}}>
+        {/* Header */}
+        <div style={{background:"linear-gradient(135deg,#1e1b4b,#312e81)",padding:"1.25rem 1.5rem",borderRadius:"20px 20px 0 0",display:"flex",alignItems:"flex-start",justifyContent:"space-between"}}>
+          <div>
+            <div style={{color:"rgba(255,255,255,.5)",fontSize:12,marginBottom:3}}>Extended Editorial Review · {st.initials} {st.surname}</div>
+            <h2 style={{color:"white",fontSize:16,fontWeight:700,margin:0}}>{submission.filename}</h2>
+            <div style={{display:"flex",gap:7,marginTop:8,flexWrap:"wrap"}}>
+              <span style={{background:"rgba(255,255,255,.15)",color:"white",padding:"3px 10px",borderRadius:99,fontSize:12,fontWeight:600}}>Citation: {r.citationReview?.declaredStyle}</span>
+              <span style={{background:sc(r.aiDetection?.estimatedAiPercentage>50?30:70)+"30",color:r.aiDetection?.estimatedAiPercentage>50?"#fca5a5":"#86efac",padding:"3px 10px",borderRadius:99,fontSize:12,fontWeight:600}}>AI Usage: ~{r.aiDetection?.estimatedAiPercentage}%</span>
+              <span style={{background:"rgba(255,255,255,.1)",color:"rgba(255,255,255,.8)",padding:"3px 10px",borderRadius:99,fontSize:12}}>Language: {r.languageReview?.overallLanguageScore}/100</span>
+            </div>
+          </div>
+          <button onClick={onClose} style={{background:"rgba(255,255,255,.1)",border:"none",borderRadius:7,width:28,height:28,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center"}}><Ic n="x" size={14} c="white"/></button>
+        </div>
+
+        {/* Tabs */}
+        <div style={{padding:"0 1.4rem",background:"#f8fafc",borderBottom:"1px solid #e2e8f0",display:"flex",overflowX:"auto"}}>
+          {tabs.map(t=><button key={t.id} onClick={()=>setTab(t.id)} style={{padding:"10px 13px",border:"none",background:"none",cursor:"pointer",fontWeight:tab===t.id?700:400,color:tab===t.id?"#1e1b4b":"#94a3b8",borderBottom:`2px solid ${tab===t.id?"#4f46e5":"transparent"}`,fontSize:12,whiteSpace:"nowrap"}}>{t.label}</button>)}
+        </div>
+
+        <div style={{padding:"1.4rem",overflow:"auto",flex:1}}>
+
+          {/* ── LANGUAGE ── */}
+          {tab==="language"&&r.languageReview&&(
+            <>
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginBottom:16}}>
+                <div style={{background:"#f8fafc",borderRadius:11,padding:"1rem",textAlign:"center"}}>
+                  <div style={{fontSize:11,color:"#64748b",fontWeight:600,marginBottom:4}}>LANGUAGE SCORE</div>
+                  <ScoreBadge score={r.languageReview.overallLanguageScore}/>
+                </div>
+                <div style={{background:"#f8fafc",borderRadius:11,padding:"1rem",textAlign:"center"}}>
+                  <div style={{fontSize:11,color:"#64748b",fontWeight:600,marginBottom:4}}>READABILITY</div>
+                  <ScoreBadge score={r.languageReview.readabilityScore}/>
+                  <div style={{fontSize:12,color:"#64748b",marginTop:4}}>{r.languageReview.readabilityComment}</div>
+                </div>
+              </div>
+              {r.languageReview.spellingErrors?.length>0&&(
+                <div style={{marginBottom:14}}>
+                  <h3 style={{fontSize:13,fontWeight:700,color:"#dc2626",margin:"0 0 8px"}}>Spelling Errors ({r.languageReview.spellingErrors.length})</h3>
+                  <div style={{display:"flex",flexDirection:"column",gap:5}}>
+                    {r.languageReview.spellingErrors.map((e,i)=>(
+                      <div key={i} style={{background:"#fee2e2",borderRadius:8,padding:"8px 11px",fontSize:13}}>
+                        <span style={{textDecoration:"line-through",color:"#991b1b",fontWeight:600}}>{e.original}</span>
+                        <span style={{color:"#64748b",margin:"0 6px"}}>→</span>
+                        <span style={{color:"#14532d",fontWeight:600}}>{e.correction}</span>
+                        {e.context&&<div style={{fontSize:11,color:"#64748b",marginTop:3,fontStyle:"italic"}}>"{e.context}"</div>}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {r.languageReview.grammarErrors?.length>0&&(
+                <div style={{marginBottom:14}}>
+                  <h3 style={{fontSize:13,fontWeight:700,color:"#d97706",margin:"0 0 8px"}}>Grammar Issues ({r.languageReview.grammarErrors.length})</h3>
+                  <div style={{display:"flex",flexDirection:"column",gap:5}}>
+                    {r.languageReview.grammarErrors.map((e,i)=>(
+                      <div key={i} style={{background:"#fffbeb",borderRadius:8,padding:"8px 11px",fontSize:13}}>
+                        <div style={{fontWeight:600,color:"#78350f",marginBottom:3}}>{e.issue}</div>
+                        {e.location&&<div style={{fontSize:12,color:"#92400e",fontStyle:"italic",marginBottom:3}}>"{e.location}"</div>}
+                        {e.suggestion&&<div style={{fontSize:12,color:"#14532d"}}>✓ {e.suggestion}</div>}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {r.languageReview.styleIssues?.length>0&&(
+                <div>
+                  <h3 style={{fontSize:13,fontWeight:700,color:"#2563b0",margin:"0 0 8px"}}>Style Issues ({r.languageReview.styleIssues.length})</h3>
+                  <div style={{display:"flex",flexDirection:"column",gap:5}}>
+                    {r.languageReview.styleIssues.map((e,i)=>(
+                      <div key={i} style={{background:"#eff6ff",borderRadius:8,padding:"8px 11px",fontSize:13}}>
+                        <span style={{fontWeight:600,color:"#1e40af"}}>{e.type}: </span>
+                        {e.location&&<span style={{fontStyle:"italic",color:"#1e3a8a"}}>"{e.location}"</span>}
+                        {e.suggestion&&<div style={{fontSize:12,color:"#14532d",marginTop:3}}>✓ {e.suggestion}</div>}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </>
+          )}
+
+          {/* ── LIT REVIEW ── */}
+          {tab==="litreview"&&r.literatureReview&&(
+            <>
+              <div style={{display:"grid",gridTemplateColumns:"repeat(2,1fr)",gap:10,marginBottom:14}}>
+                {[
+                  ["Funnel Approach",r.literatureReview.funnelApproachScore,r.literatureReview.funnelApproachComment],
+                  ["Relevance",r.literatureReview.relevanceScore,r.literatureReview.relevanceComment],
+                  ["Critical Analysis",r.literatureReview.criticalAnalysisScore,r.literatureReview.criticalAnalysisComment],
+                  ["Flow",r.literatureReview.flowScore,r.literatureReview.flowComment],
+                ].map(([label,score,comment])=>(
+                  <div key={label} style={{background:"#f8fafc",borderRadius:10,padding:"11px 13px",border:"1px solid #e2e8f0"}}>
+                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:5}}>
+                      <span style={{fontSize:12,fontWeight:700,color:"#374151"}}>{label}</span>
+                      <ScoreBadge score={score} size={18}/>
+                    </div>
+                    <div style={{height:5,background:"#e2e8f0",borderRadius:99,overflow:"hidden",marginBottom:7}}><div style={{height:"100%",width:score+"%",background:sc(score),borderRadius:99}}/></div>
+                    <div style={{fontSize:12,color:"#64748b",lineHeight:1.6}}>{comment}</div>
+                  </div>
+                ))}
+              </div>
+              <div style={{background:"#fef3c7",borderRadius:10,padding:"11px 13px",marginBottom:10}}>
+                <div style={{fontWeight:700,fontSize:12,color:"#78350f",marginBottom:6}}>FUNNEL APPROACH — WHAT TO CHECK</div>
+                <div style={{fontSize:12,color:"#92400e",lineHeight:1.7}}>The literature review should move from <strong>broad context</strong> → <strong>narrowing theme</strong> → <strong>specific gap/problem</strong>. Broad international/general literature first, then national context, then specific topic, then the exact gap this study addresses.</div>
+              </div>
+              {r.literatureReview.gaps?.length>0&&(
+                <div style={{marginBottom:10}}>
+                  <h3 style={{fontSize:13,fontWeight:700,color:"#dc2626",margin:"0 0 7px"}}>Gaps Identified</h3>
+                  {r.literatureReview.gaps.map((g,i)=><div key={i} style={{background:"#fee2e2",borderRadius:7,padding:"7px 10px",fontSize:12,color:"#7f1d1d",marginBottom:4}}>✗ {g}</div>)}
+                </div>
+              )}
+              {r.literatureReview.strengths?.length>0&&(
+                <div>
+                  <h3 style={{fontSize:13,fontWeight:700,color:"#16a34a",margin:"0 0 7px"}}>Strengths</h3>
+                  {r.literatureReview.strengths.map((g,i)=><div key={i} style={{background:"#f0fdf4",borderRadius:7,padding:"7px 10px",fontSize:12,color:"#14532d",marginBottom:4}}>✓ {g}</div>)}
+                </div>
+              )}
+            </>
+          )}
+
+          {/* ── CITATIONS ── */}
+          {tab==="citations"&&r.citationReview&&(
+            <>
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:10,marginBottom:14}}>
+                <div style={{background:"#f8fafc",borderRadius:10,padding:"11px",textAlign:"center"}}>
+                  <div style={{fontSize:11,color:"#64748b",fontWeight:600,marginBottom:3}}>CITATION SCORE</div>
+                  <ScoreBadge score={r.citationReview.overallCitationScore}/>
+                </div>
+                <div style={{background:"#fee2e2",borderRadius:10,padding:"11px",textAlign:"center"}}>
+                  <div style={{fontSize:11,color:"#991b1b",fontWeight:600,marginBottom:3}}>MISSING REFS</div>
+                  <div style={{fontSize:22,fontWeight:800,color:"#dc2626"}}>{r.citationReview.missingReferences?.length||0}</div>
+                </div>
+                <div style={{background:"#fffbeb",borderRadius:10,padding:"11px",textAlign:"center"}}>
+                  <div style={{fontSize:11,color:"#78350f",fontWeight:600,marginBottom:3}}>ORPHANED REFS</div>
+                  <div style={{fontSize:22,fontWeight:800,color:"#d97706"}}>{r.citationReview.orphanedReferences?.length||0}</div>
+                </div>
+              </div>
+              {r.citationReview.citationIssuesSummary&&(
+                <div style={{background:"#f0f9ff",border:"1px solid #bae6fd",borderLeft:"4px solid #0ea5e9",borderRadius:9,padding:"10px 13px",marginBottom:14,fontSize:13,color:"#0c4a6e",lineHeight:1.7}}>{r.citationReview.citationIssuesSummary}</div>
+              )}
+              {r.citationReview.inTextCitations?.length>0&&(
+                <div style={{marginBottom:14}}>
+                  <h3 style={{fontSize:13,fontWeight:700,margin:"0 0 8px"}}>In-Text Citations ({r.citationReview.inTextCitations.length})</h3>
+                  <div style={{display:"flex",flexDirection:"column",gap:6}}>
+                    {r.citationReview.inTextCitations.map((c,i)=>(
+                      <div key={i} style={{background:c.isCorrect?"#f0fdf4":"#fef9ee",borderRadius:9,padding:"9px 12px",border:`1px solid ${c.isCorrect?"#bbf7d0":"#fde68a"}`}}>
+                        <div style={{display:"flex",alignItems:"flex-start",justifyContent:"space-between",gap:10}}>
+                          <div style={{flex:1}}>
+                            <div style={{fontWeight:700,fontSize:13,color:c.isCorrect?"#14532d":"#78350f"}}>{c.citation}</div>
+                            {c.location&&<div style={{fontSize:11,color:"#64748b",fontStyle:"italic",marginTop:2}}>"{c.location}"</div>}
+                            {!c.isCorrect&&c.issue&&<div style={{fontSize:12,color:"#dc2626",marginTop:4}}>⚠ {c.issue}</div>}
+                            {!c.isCorrect&&c.correction&&<div style={{fontSize:12,color:"#14532d",marginTop:2}}>✓ {c.correction}</div>}
+                          </div>
+                          <a href={buildScholarUrl(c.searchQuery||c.citation)} target="_blank" rel="noopener noreferrer" style={{background:"#eff6ff",color:"#1e40af",padding:"4px 9px",borderRadius:6,fontSize:11,fontWeight:600,whiteSpace:"nowrap",textDecoration:"none",border:"1px solid #bfdbfe",flexShrink:0}}>Find Source ↗</a>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {r.citationReview.referenceList?.length>0&&(
+                <div style={{marginBottom:14}}>
+                  <h3 style={{fontSize:13,fontWeight:700,margin:"0 0 8px"}}>Reference List ({r.citationReview.referenceList.length})</h3>
+                  <div style={{display:"flex",flexDirection:"column",gap:6}}>
+                    {r.citationReview.referenceList.map((ref,i)=>(
+                      <div key={i} style={{background:ref.isCorrect?"#f0fdf4":"#fee2e2",borderRadius:9,padding:"9px 12px",border:`1px solid ${ref.isCorrect?"#bbf7d0":"#fecaca"}`}}>
+                        <div style={{display:"flex",alignItems:"flex-start",justifyContent:"space-between",gap:10}}>
+                          <div style={{flex:1}}>
+                            <div style={{fontSize:12,lineHeight:1.6,color:"#1a1a1a"}}>{ref.fullReference}</div>
+                            {!ref.isCorrect&&ref.issue&&<div style={{fontSize:11,color:"#dc2626",marginTop:4}}>⚠ {ref.issue}</div>}
+                            {!ref.isCorrect&&ref.correction&&<div style={{fontSize:11,color:"#14532d",marginTop:2}}>✓ {ref.correction}</div>}
+                          </div>
+                          <div style={{display:"flex",flexDirection:"column",gap:4,flexShrink:0}}>
+                            {ref.doiOrUrl?(
+                              <a href={ref.doiOrUrl.startsWith("10.")?"https://doi.org/"+ref.doiOrUrl:ref.doiOrUrl} target="_blank" rel="noopener noreferrer" style={{background:"#dcfce7",color:"#14532d",padding:"4px 9px",borderRadius:6,fontSize:11,fontWeight:600,whiteSpace:"nowrap",textDecoration:"none",border:"1px solid #bbf7d0"}}>Open Source ↗</a>
+                            ):(
+                              <a href={buildScholarUrl(ref.searchQuery||ref.fullReference)} target="_blank" rel="noopener noreferrer" style={{background:"#eff6ff",color:"#1e40af",padding:"4px 9px",borderRadius:6,fontSize:11,fontWeight:600,whiteSpace:"nowrap",textDecoration:"none",border:"1px solid #bfdbfe"}}>Find Source ↗</a>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {(r.citationReview.missingReferences?.length>0||r.citationReview.orphanedReferences?.length>0)&&(
+                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+                  {r.citationReview.missingReferences?.length>0&&(
+                    <div>
+                      <h3 style={{fontSize:12,fontWeight:700,color:"#dc2626",margin:"0 0 6px"}}>Cited but not in Reference List</h3>
+                      {r.citationReview.missingReferences.map((m,i)=><div key={i} style={{background:"#fee2e2",borderRadius:6,padding:"5px 9px",fontSize:12,color:"#7f1d1d",marginBottom:3}}>✗ {m}</div>)}
+                    </div>
+                  )}
+                  {r.citationReview.orphanedReferences?.length>0&&(
+                    <div>
+                      <h3 style={{fontSize:12,fontWeight:700,color:"#d97706",margin:"0 0 6px"}}>In Reference List but not Cited</h3>
+                      {r.citationReview.orphanedReferences.map((m,i)=><div key={i} style={{background:"#fffbeb",borderRadius:6,padding:"5px 9px",fontSize:12,color:"#78350f",marginBottom:3}}>⚠ {m}</div>)}
+                    </div>
+                  )}
+                </div>
+              )}
+            </>
+          )}
+
+          {/* ── AI DETECTION ── */}
+          {tab==="ai"&&r.aiDetection&&(
+            <>
+              <div style={{display:"flex",gap:14,marginBottom:14,flexWrap:"wrap"}}>
+                <div style={{background:"#0f172a",borderRadius:14,padding:"1.25rem 1.5rem",textAlign:"center",minWidth:160}}>
+                  <div style={{fontSize:11,color:"rgba(255,255,255,.5)",fontWeight:600,marginBottom:6}}>ESTIMATED AI CONTENT</div>
+                  <div style={{fontSize:52,fontWeight:900,color:r.aiDetection.estimatedAiPercentage>60?"#f87171":r.aiDetection.estimatedAiPercentage>30?"#fbbf24":"#4ade80",lineHeight:1}}>{r.aiDetection.estimatedAiPercentage}%</div>
+                  <div style={{fontSize:12,color:"rgba(255,255,255,.4)",marginTop:4}}>Confidence: {r.aiDetection.confidence}</div>
+                </div>
+                <div style={{flex:1,background:"#f8fafc",borderRadius:14,padding:"1.1rem 1.3rem"}}>
+                  <div style={{fontSize:12,fontWeight:700,color:"#374151",marginBottom:6}}>AI USAGE ASSESSMENT</div>
+                  <div style={{fontSize:13,color:"#64748b",lineHeight:1.7}}>{r.aiDetection.aiComment}</div>
+                </div>
+              </div>
+              {r.aiDetection.aiSections?.length>0&&(
+                <div style={{marginBottom:12}}>
+                  <h3 style={{fontSize:13,fontWeight:700,color:"#dc2626",margin:"0 0 8px"}}>Suspected AI-Generated Sections</h3>
+                  <div style={{display:"flex",flexDirection:"column",gap:6}}>
+                    {r.aiDetection.aiSections.map((s,i)=>(
+                      <div key={i} style={{background:"#fee2e2",borderRadius:9,padding:"10px 13px",border:"1px solid #fecaca"}}>
+                        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:5}}>
+                          <span style={{fontWeight:700,fontSize:13,color:"#7f1d1d"}}>{s.section}</span>
+                          <span style={{background:s.likelihood==="High"?"#dc2626":s.likelihood==="Medium"?"#d97706":"#64748b",color:"white",padding:"2px 8px",borderRadius:99,fontSize:11,fontWeight:600}}>{s.likelihood} likelihood</span>
+                        </div>
+                        {s.excerpt&&<div style={{fontSize:12,color:"#991b1b",fontStyle:"italic",marginBottom:5}}>"{s.excerpt}…"</div>}
+                        {s.indicators?.length>0&&<div style={{display:"flex",gap:5,flexWrap:"wrap"}}>{s.indicators.map((ind,j)=><span key={j} style={{background:"#fecaca",color:"#7f1d1d",padding:"2px 7px",borderRadius:99,fontSize:11}}>{ind}</span>)}</div>}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {r.aiDetection.humanSections?.length>0&&(
+                <div>
+                  <h3 style={{fontSize:13,fontWeight:700,color:"#16a34a",margin:"0 0 8px"}}>Human-Written Sections</h3>
+                  {r.aiDetection.humanSections.map((s,i)=><div key={i} style={{background:"#f0fdf4",borderRadius:7,padding:"7px 10px",fontSize:12,color:"#14532d",marginBottom:4}}>✓ {s}</div>)}
+                </div>
+              )}
+            </>
+          )}
+
+          {/* ── FLOW ── */}
+          {tab==="flow"&&r.informationFlow&&(
+            <>
+              <div style={{display:"flex",gap:14,marginBottom:14,alignItems:"center"}}>
+                <div style={{background:"#f8fafc",borderRadius:11,padding:"1rem",textAlign:"center",minWidth:120}}>
+                  <div style={{fontSize:11,color:"#64748b",fontWeight:600,marginBottom:3}}>FLOW SCORE</div>
+                  <ScoreBadge score={r.informationFlow.overallFlowScore}/>
+                </div>
+                <div style={{flex:1}}>
+                  <div style={{fontSize:12,fontWeight:600,color:"#374151",marginBottom:4}}>Transition Quality: <span style={{color:r.informationFlow.transitionQuality==="Excellent"?"#16a34a":r.informationFlow.transitionQuality==="Good"?"#2563b0":r.informationFlow.transitionQuality==="Fair"?"#d97706":"#dc2626"}}>{r.informationFlow.transitionQuality}</span></div>
+                  <div style={{fontSize:13,color:"#64748b",lineHeight:1.6}}>{r.informationFlow.logicalProgressionComment}</div>
+                </div>
+              </div>
+              {r.informationFlow.sectionFlow?.length>0&&(
+                <div style={{marginBottom:12}}>
+                  <h3 style={{fontSize:13,fontWeight:700,margin:"0 0 8px"}}>Section-by-Section Flow</h3>
+                  <div style={{display:"flex",flexDirection:"column",gap:6}}>
+                    {r.informationFlow.sectionFlow.map((s,i)=>(
+                      <div key={i} style={{background:"#f8fafc",borderRadius:9,padding:"9px 12px",border:"1px solid #e2e8f0"}}>
+                        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4}}>
+                          <span style={{fontWeight:700,fontSize:13}}>{s.section}</span>
+                          <ScoreBadge score={s.flowScore} size={16}/>
+                        </div>
+                        <div style={{height:4,background:"#e2e8f0",borderRadius:99,overflow:"hidden",marginBottom:5}}><div style={{height:"100%",width:s.flowScore+"%",background:sc(s.flowScore),borderRadius:99}}/></div>
+                        <div style={{fontSize:12,color:"#64748b"}}>{s.comment}</div>
+                        {s.issue&&<div style={{fontSize:11,color:"#dc2626",marginTop:3}}>⚠ {s.issue}</div>}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {r.informationFlow.recommendations?.length>0&&(
+                <div>
+                  <h3 style={{fontSize:13,fontWeight:700,margin:"0 0 8px"}}>Recommendations</h3>
+                  {r.informationFlow.recommendations.map((rec,i)=><div key={i} style={{background:"#eff6ff",borderRadius:7,padding:"7px 10px",fontSize:12,color:"#1e40af",marginBottom:4}}>→ {rec}</div>)}
+                </div>
+              )}
+            </>
+          )}
+
+          {/* ── SUMMARY ── */}
+          {tab==="summary"&&(
+            <>
+              <div style={{background:"#f0f9ff",border:"1px solid #bae6fd",borderLeft:"4px solid #0ea5e9",borderRadius:10,padding:"1rem 1.2rem",marginBottom:14,fontSize:14,color:"#0c4a6e",lineHeight:1.85}}>{r.editorialSummary}</div>
+              {r.priorityCorrections?.length>0&&(
+                <div>
+                  <h3 style={{fontSize:13,fontWeight:700,margin:"0 0 9px"}}>Priority Corrections</h3>
+                  <div style={{display:"flex",flexDirection:"column",gap:6}}>
+                    {r.priorityCorrections.map((c,i)=>(
+                      <div key={i} style={{display:"flex",gap:10,padding:"10px 12px",borderRadius:9,background:pb(c.priority)}}>
+                        <div style={{display:"flex",gap:5,flexShrink:0}}>
+                          <span style={{fontWeight:700,fontSize:11,color:pc(c.priority),background:pc(c.priority)+"22",padding:"2px 7px",borderRadius:5,height:"fit-content"}}>{c.priority}</span>
+                          <span style={{fontWeight:600,fontSize:11,color:"#64748b",background:"#f1f5f9",padding:"2px 7px",borderRadius:5,height:"fit-content"}}>{c.type}</span>
+                        </div>
+                        <span style={{fontSize:13,lineHeight:1.6}}>{c.action}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </>
+          )}
+
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// SUPERVISOR SUBMIT ON BEHALF OF STUDENT
+// ═══════════════════════════════════════════════════════════════════════
+
+function SupSubmitModal({db,student,onClose,showToast}){
+  const fileRef=useRef();
+  const[file,setFile]=useState(null);
+  const[text,setText]=useState("");
+  const[citStyle,setCitStyle]=useState("apa");
+  const[loading,setLoading]=useState(false);
+  const[loadingExt,setLoadingExt]=useState(false);
+  const[error,setError]=useState("");
+  const sup=db.supervisors.find(s=>s.id===student.supervisorId);
+
+  const handleFile=async f=>{
+    if(!f)return;setFile(f);setError("");setText("");
+    const ext=f.name.split(".").pop().toLowerCase();
+    try{
+      let extracted="";
+      if(ext==="docx"||ext==="doc"){
+        const buf=await f.arrayBuffer();
+        const res=await mammoth.extractRawText({arrayBuffer:buf});
+        extracted=res.value||"";
+      } else if(ext==="pdf"){
+        extracted=await extractPdfText(f);
+      } else {
+        extracted=await new Promise((res,rej)=>{const r=new FileReader();r.onload=e=>res(e.target.result||"");r.onerror=rej;r.readAsText(f);});
+      }
+      setText(extracted);
+      if(extracted.length>50000) setError("⚠ Large document ("+Math.round(extracted.length/1000)+"KB text). Only first ~14,000 characters will be analysed. Submit individual chapters for best results.");
+      else if(extracted.length<100) setError("⚠ Could not extract text from this file. Try converting to .docx or .txt first.");
+    }catch(e){setError("Could not read file: "+e.message);}
+  };
+
+  const[progress,setProgress]=useState("");
+  const submit=async(extended)=>{
+    if(!text.trim())return setError("Upload a document first.");
+    extended?setLoadingExt(true):setLoading(true);setError("");setProgress("");
+    try{
+      const notes=(sup?`Supervisor: ${sup.name}. `:"")+( student.extraPrompt||"");
+      const result=await analyzeDoc(text,student,notes,(cur,tot)=>setProgress(tot>1?`Analysing chunk ${cur} of ${tot}…`:"Analysing…"));
+      let extendedResult=null;
+      if(extended){
+        setProgress("Running extended review…");
+        extendedResult=await analyzeDocExtended(text,student,citStyle,notes,(cur,tot)=>setProgress(`Extended: chunk ${cur} of ${tot}…`));
+      }
+      const sub={id:"sub_"+uid(),studentId:student.id,filename:file?.name||"Document",date:new Date().toISOString(),submittedBy:"supervisor",result,...(extendedResult?{extendedResult,citationStyle:citStyle}:{})};
+      db.setSubmissions(prev=>[...prev,sub]);
+      showToast(extended?"Extended analysis complete!":"Analysis complete!");
+      onClose();
+    }catch(e){setError("Analysis failed: "+(e.message||"Try again."));}
+    setLoading(false);setLoadingExt(false);
+  };
+
+  const sl=STRICTNESS.find(l=>l.id===(student.strictness||"strict"));
+  return(
+    <Modal title={`Submit on behalf of ${student.initials} ${student.surname}`} onClose={onClose} maxW={580}>
+      <div style={{background:"#f8fafc",borderRadius:10,padding:"9px 12px",marginBottom:13,fontSize:13}}>
+        <span style={{color:sl?.color||"#d97706",fontWeight:700}}>{sl?.label}</span> · {student.level} · {(student.fields||[]).slice(0,2).join(", ")}
+      </div>
+      <label style={LS}>Citation Style Used in Document</label>
+      <select value={citStyle} onChange={e=>setCitStyle(e.target.value)} style={{...IS,marginBottom:12}}>
+        {CITATION_STYLES.map(s=><option key={s.id} value={s.id}>{s.label}</option>)}
+      </select>
+      <div onClick={()=>fileRef.current?.click()} onDragOver={e=>e.preventDefault()} onDrop={e=>{e.preventDefault();handleFile(e.dataTransfer.files[0]);}} style={{border:`2px dashed ${file?"#3b82f6":"#cbd5e1"}`,borderRadius:11,padding:"1.5rem",textAlign:"center",cursor:"pointer",background:file?"#eff6ff":"#fafafa",marginBottom:11}}>
+        <input ref={fileRef} type="file" accept=".txt,.md,.pdf,.docx,.doc" style={{display:"none"}} onChange={e=>handleFile(e.target.files[0])}/>
+        <Ic n="upload" size={24} c={file?"#3b82f6":"#94a3b8"}/>
+        <div style={{marginTop:7,fontWeight:600,color:file?"#1e40af":"#374151",fontSize:13}}>{file?file.name:"Drop document here or click to browse"}</div>
+        {file&&<div style={{fontSize:11,color:"#94a3b8",marginTop:2}}>{(file.size/1024).toFixed(1)} KB</div>}
+      </div>
+      {progress&&(loading||loadingExt)&&<div style={{background:"#eff6ff",color:"#1e40af",borderRadius:7,padding:"8px 11px",fontSize:13,marginBottom:8,display:"flex",alignItems:"center",gap:7}}><div style={{animation:"spin 1s linear infinite",display:"inline-flex"}}><Ic n="spin" size={13} c="#3b82f6"/></div>{progress}</div>}
+      {error&&!loading&&!loadingExt&&<div style={{background:"#fee2e2",color:"#991b1b",borderRadius:7,padding:"8px 11px",fontSize:13,marginBottom:10}}>{error}</div>}
+      <div style={{display:"flex",gap:8}}>
+        <button onClick={()=>submit(false)} disabled={!text||loading||loadingExt} style={{...BP,display:"flex",alignItems:"center",justifyContent:"center",gap:6,opacity:(!text||loading||loadingExt)?0.6:1,cursor:(!text||loading||loadingExt)?"not-allowed":"pointer"}}>
+          {loading?<><div style={{animation:"spin 1s linear infinite",display:"inline-flex"}}><Ic n="spin" size={14} c="white"/></div>Analysing…</>:<><Ic n="chart" size={14} c="white"/>Standard Analysis</>}
+        </button>
+        <button onClick={()=>submit(true)} disabled={!text||loading||loadingExt} style={{...BP,background:"linear-gradient(135deg,#4f46e5,#3730a3)",display:"flex",alignItems:"center",justifyContent:"center",gap:6,opacity:(!text||loading||loadingExt)?0.6:1,cursor:(!text||loading||loadingExt)?"not-allowed":"pointer"}}>
+          {loadingExt?<><div style={{animation:"spin 1s linear infinite",display:"inline-flex"}}><Ic n="spin" size={14} c="white"/></div>Extended…</>:<><Ic n="award" size={14} c="white"/>+ Extended Review</>}
+        </button>
+      </div>
+      <p style={{fontSize:11,color:"#94a3b8",marginTop:8}}>Extended Review includes: language/grammar check, literature review funnel analysis, citation verification with source links, AI detection, and information flow analysis.</p>
     </Modal>
   );
 }
@@ -886,8 +1494,10 @@ function AdminStudentsTab({db,showToast}){
   const cols=[
     {label:"Student",   render:r=><span style={{fontWeight:700}}>{r.initials} {r.surname}</span>},
     {label:"Number",    render:r=><code style={{fontSize:12}}>{r.number}</code>},
+    {label:"Institution", render:r=><span style={{fontSize:12,color:"#64748b"}}>{r.institution||"—"}</span>},
     {label:"Level",     render:r=><Pill label={r.level} bg="#dbeafe" color="#1e40af"/>},
     {label:"Supervisor",render:r=>{const s=getSup(r.supervisorId);return s?<span style={{color:"#14532d",fontSize:12}}>{s.name}</span>:<span style={{color:"#94a3b8",fontSize:12}}>Unassigned</span>;}},
+    {label:"Co-Supervisors",render:r=>{const cos=(r.coSupervisorIds||[]).map(id=>db.supervisors.find(s=>s.id===id)?.name).filter(Boolean);return cos.length>0?<span style={{fontSize:12,color:"#5b21b6"}}>{cos.join(", ")}</span>:<span style={{color:"#e2e8f0",fontSize:12}}>—</span>;}},
     {label:"Reports",   render:r=>db.submissions.filter(s=>s.studentId===r.id).length},
     {label:"",          render:r=><div style={{display:"flex",gap:5}}>
       <button onClick={()=>setEdit(r)} style={{background:"#eff6ff",border:"none",borderRadius:6,padding:"4px 7px",cursor:"pointer",color:"#3b82f6"}}><Ic n="edit" size={13}/></button>
@@ -918,17 +1528,22 @@ function AllReportsTab({db}){
     {label:"Score",     render:r=><span style={{fontWeight:800,color:sc(r.result?.overallScore||0)}}>{r.result?.overallScore??"-"}%</span>},
     {label:"Decision",  render:r=>r.result?.supervisorDecision?<Pill label={r.result.supervisorDecision} bg={sb(r.result.overallScore||0)} color={dc2(r.result.supervisorDecision)}/>:"-"},
     {label:"Date",      render:r=><span style={{color:"#94a3b8",fontSize:12}}>{new Date(r.date).toLocaleDateString("en-ZA")}</span>},
-    {label:"",          render:r=><button onClick={()=>setView(r)} style={{background:"none",border:"none",cursor:"pointer",color:"#3b82f6"}}><Ic n="eye" size={14}/></button>},
+    {label:"",          render:r=><div style={{display:"flex",gap:5}}><button onClick={()=>setView(r)} style={{background:"none",border:"none",cursor:"pointer",color:"#3b82f6"}}><Ic n="eye" size={14}/></button>{r.extendedResult&&<button onClick={()=>setViewExt(r)} style={{background:"#ede9fe",border:"none",borderRadius:6,padding:"3px 7px",cursor:"pointer",color:"#4f46e5",fontSize:11,fontWeight:600}}>Ext</button>}</div>},
   ];
+  const[viewExt,setViewExt]=useState(null);
   return(
     <><PageHeader title="All Reports"/>
     <Pad><DataTable cols={cols} rows={rows} empty="No reports submitted yet."/></Pad>
-    {view&&<FeedbackModal submission={view} students={db.students} onClose={()=>setView(null)}/>}</>
+    {view&&<FeedbackModal submission={view} students={db.students} onClose={()=>setView(null)}/>}
+    {viewExt&&<ExtendedFeedbackModal submission={viewExt} students={db.students} onClose={()=>setViewExt(null)}/>}</>
   );
 }
 
 function AllocateTab({db,showToast}){
-  const[selSup,setSelSup]=useState("");const[search,setSearch]=useState("");
+  // Co-supervisor helpers
+  const addCoSup=(stuId,supId)=>{ db.setStudents(prev=>prev.map(s=>s.id===stuId?{...s,coSupervisorIds:[...(s.coSupervisorIds||[]).filter(x=>x!==supId),supId]}:s)); showToast("Co-supervisor added."); };
+  const removeCoSup=(stuId,supId)=>{ db.setStudents(prev=>prev.map(s=>s.id===stuId?{...s,coSupervisorIds:(s.coSupervisorIds||[]).filter(x=>x!==supId)}:s)); showToast("Co-supervisor removed."); };
+  const[selSup,setSelSup]=useState("");const[search,setSearch]=useState("");const[allocTab,setAllocTab]=useState("primary");
   const sup=db.supervisors.find(s=>s.id===selSup);
   const all=db.students.filter(s=>`${s.surname} ${s.initials} ${s.number}`.toLowerCase().includes(search.toLowerCase()));
   const mine=all.filter(s=>s.supervisorId===selSup);
@@ -946,8 +1561,14 @@ function AllocateTab({db,showToast}){
         </select>
       </div>
       {selSup&&<>
+        <div style={{display:"flex",background:"#f1f5f9",borderRadius:10,padding:3,marginBottom:14,gap:2,maxWidth:320}}>
+          {[["primary","Primary Supervisor"],["cosup","Co-Supervisor"]].map(([k,l])=>(
+            <button key={k} onClick={()=>setAllocTab(k)} style={{flex:1,padding:"6px 0",borderRadius:8,border:"none",fontWeight:600,fontSize:12,cursor:"pointer",background:allocTab===k?"white":"transparent",color:allocTab===k?"#0f172a":"#64748b",boxShadow:allocTab===k?"0 1px 4px rgba(0,0,0,.1)":"none"}}>{l}</button>
+          ))}
+        </div>
         <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search students…" style={{...IS,maxWidth:300,marginBottom:14}}/>
-        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14}}>
+        {allocTab==="cosup"&&<CoSupAllocPanel db={db} selSup={selSup} search={search} addCoSup={addCoSup} removeCoSup={removeCoSup}/>}
+        {allocTab==="primary"&&<div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14}}>
           <div>
             <h3 style={{fontSize:13,fontWeight:700,margin:"0 0 9px",color:"#16a34a"}}>✓ Assigned to {sup?.name} ({mine.length})</h3>
             <div style={{display:"flex",flexDirection:"column",gap:5}}>
@@ -973,12 +1594,48 @@ function AllocateTab({db,showToast}){
               })}
             </div>
           </div>
-        </div>
+        </div>}
       </>}
     </Pad></>
   );
 }
 
+
+
+function CoSupAllocPanel({db,selSup,search,addCoSup,removeCoSup}){
+  const all=db.students.filter(s=>`${s.surname} ${s.initials} ${s.number}`.toLowerCase().includes(search.toLowerCase()));
+  const assigned=all.filter(s=>(s.coSupervisorIds||[]).includes(selSup));
+  const notAssigned=all.filter(s=>!(s.coSupervisorIds||[]).includes(selSup));
+  return(
+    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14}}>
+      <div>
+        <h3 style={{fontSize:13,fontWeight:700,margin:"0 0 9px",color:"#8b5cf6"}}>Co-supervising ({assigned.length})</h3>
+        <div style={{display:"flex",flexDirection:"column",gap:5}}>
+          {assigned.length===0?<div style={{fontSize:13,color:"#94a3b8"}}>None assigned.</div>:assigned.map(s=>(
+            <div key={s.id} style={{display:"flex",alignItems:"center",justifyContent:"space-between",background:"#f5f3ff",borderRadius:9,padding:"8px 11px",border:"1px solid #ddd6fe"}}>
+              <div><div style={{fontWeight:700,fontSize:13}}>{s.initials} {s.surname}</div><div style={{fontSize:11,color:"#64748b"}}>{s.number} · {s.level}</div></div>
+              <button onClick={()=>removeCoSup(s.id,selSup)} style={{background:"#fee2e2",border:"none",borderRadius:6,padding:"4px 8px",cursor:"pointer",color:"#dc2626",fontSize:12}}>Remove</button>
+            </div>
+          ))}
+        </div>
+      </div>
+      <div>
+        <h3 style={{fontSize:13,fontWeight:700,margin:"0 0 9px",color:"#64748b"}}>Other students ({notAssigned.length})</h3>
+        <div style={{display:"flex",flexDirection:"column",gap:5}}>
+          {notAssigned.length===0?<div style={{fontSize:13,color:"#94a3b8"}}>No other students.</div>:notAssigned.map(s=>{
+            const primarySup=db.supervisors.find(x=>x.id===s.supervisorId);
+            return(
+              <div key={s.id} style={{display:"flex",alignItems:"center",justifyContent:"space-between",background:"#f8fafc",borderRadius:9,padding:"8px 11px",border:"1px solid #e2e8f0"}}>
+                <div><div style={{fontWeight:700,fontSize:13}}>{s.initials} {s.surname}</div><div style={{fontSize:11,color:"#64748b"}}>{s.number}{primarySup?<> · <span style={{color:"#3b82f6"}}>{primarySup.name}</span></>:""}</div></div>
+                <button onClick={()=>addCoSup(s.id,selSup)} style={{background:"#ede9fe",border:"none",borderRadius:6,padding:"4px 8px",cursor:"pointer",color:"#5b21b6",fontSize:12}}>Add</button>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    </div>
+  );
+}
 
 // ═══════════════════════════════════════════════════════════
 // ACCOUNT SETTINGS (shared by admin + supervisor)
@@ -1055,8 +1712,10 @@ function SupervisorPortal({db,session,onLogout,showToast}){
   const[view,setView]=useState("dashboard");
   const me=db.supervisors.find(s=>s.id===session.id)||{};
   const myStudents=db.students.filter(s=>s.supervisorId===session.id);
+  const coStudents=db.students.filter(s=>s.supervisorId!==session.id&&(s.coSupervisorIds||[]).includes(session.id));
+  const allMyIds=new Set([...myStudents.map(s=>s.id),...coStudents.map(s=>s.id)]);
   const myIds=new Set(myStudents.map(s=>s.id));
-  const mySubs=db.submissions.filter(s=>myIds.has(s.studentId));
+  const mySubs=db.submissions.filter(s=>allMyIds.has(s.studentId));
   const pending=db.students.filter(s=>s.requestedSupervisorId===session.id&&s.supervisorId!==session.id);
 
   const nav=[
@@ -1068,15 +1727,15 @@ function SupervisorPortal({db,session,onLogout,showToast}){
 
   return(
     <Shell role="supervisor" nav={nav} active={view} setActive={setView} onLogout={onLogout} badge={me.name}>
-      {view==="dashboard"&&<SupDashboard db={db} myStudents={myStudents} mySubs={mySubs}/>}
-      {view==="students" &&<SupStudents  db={db} session={session} myStudents={myStudents} pending={pending} showToast={showToast}/>}
-      {view==="reports"  &&<SupReports  db={db} myStudents={myStudents} mySubs={mySubs}/>}
+      {view==="dashboard"&&<SupDashboard db={db} myStudents={myStudents} coStudents={coStudents} mySubs={mySubs}/>}
+      {view==="students" &&<SupStudents  db={db} session={session} myStudents={myStudents} coStudents={coStudents} pending={pending} showToast={showToast}/>}
+      {view==="reports"  &&<SupReports  db={db} myStudents={[...myStudents,...coStudents]} mySubs={mySubs}/>}
       {view==="settings" &&<AccountSettings role="supervisor" db={db} session={session} showToast={showToast}/>}
     </Shell>
   );
 }
 
-function SupDashboard({db,myStudents,mySubs}){
+function SupDashboard({db,myStudents,coStudents,mySubs}){
   const avg=mySubs.length?Math.round(mySubs.reduce((a,s)=>a+(s.result?.overallScore||0),0)/mySubs.length):0;
   const approved=mySubs.filter(s=>s.result?.supervisorDecision==="APPROVED").length;
   return(
@@ -1084,6 +1743,7 @@ function SupDashboard({db,myStudents,mySubs}){
     <Pad>
       <StatCards cards={[
         {label:"My Students",value:myStudents.length, icon:"users",color:"#3b82f6"},
+        {label:"Co-Supervised",value:(coStudents||[]).length,icon:"users",color:"#8b5cf6"},
         {label:"Reports",    value:mySubs.length,     icon:"file", color:"#8b5cf6"},
         {label:"Approved",   value:approved,          icon:"check",color:"#16a34a"},
         {label:"Avg Score",  value:avg+"%",           icon:"chart",color:"#d97706"},
@@ -1093,8 +1753,8 @@ function SupDashboard({db,myStudents,mySubs}){
   );
 }
 
-function SupStudents({db,session,myStudents,pending,showToast}){
-  const[showAdd,setShowAdd]=useState(false);const[edit,setEdit]=useState(null);const[showPending,setShowPending]=useState(false);
+function SupStudents({db,session,myStudents,coStudents,pending,showToast}){
+  const[showAdd,setShowAdd]=useState(false);const[edit,setEdit]=useState(null);const[showPending,setShowPending]=useState(false);const[submitFor,setSubmitFor]=useState(null);
   const approve=s=>{db.setStudents(prev=>prev.map(st=>st.id===s.id?{...st,supervisorId:session.id,requestedSupervisorId:null}:st));showToast(`${s.initials} ${s.surname} approved.`);};
   const decline=s=>{db.setStudents(prev=>prev.map(st=>st.id===s.id?{...st,requestedSupervisorId:null}:st));showToast(`${s.initials} ${s.surname} declined.`,"error");};
   const remove=s=>{if(!window.confirm(`Remove ${s.initials} ${s.surname}?`))return;db.setStudents(prev=>prev.map(st=>st.id===s.id?{...st,supervisorId:null}:st));showToast("Student removed.");};
@@ -1106,6 +1766,7 @@ function SupStudents({db,session,myStudents,pending,showToast}){
     {label:"Reports",render:r=>db.submissions.filter(s=>s.studentId===r.id).length},
     {label:"",       render:r=><div style={{display:"flex",gap:5}}>
       <button onClick={()=>setEdit(r)} style={{background:"#eff6ff",border:"none",borderRadius:6,padding:"4px 7px",cursor:"pointer",color:"#3b82f6"}}><Ic n="edit" size={13}/></button>
+      <button onClick={()=>setSubmitFor(r)} title="Submit on behalf of student" style={{background:"#f0fdf4",border:"none",borderRadius:6,padding:"4px 7px",cursor:"pointer",color:"#16a34a"}}><Ic n="upload" size={13}/></button>
       <button onClick={()=>remove(r)} style={{background:"#fee2e2",border:"none",borderRadius:6,padding:"4px 7px",cursor:"pointer",color:"#dc2626"}}><Ic n="trash" size={13}/></button>
     </div>},
   ];
@@ -1119,7 +1780,20 @@ function SupStudents({db,session,myStudents,pending,showToast}){
       }/>
       <Pad><DataTable cols={cols} rows={myStudents} empty="No students assigned to you yet."/></Pad>
       {showAdd&&<StudentFormModal db={db} supervisorId={session.id} onClose={()=>setShowAdd(false)} showToast={showToast}/>}
+      {(coStudents||[]).length>0&&(
+        <Pad>
+          <h3 style={{fontSize:14,fontWeight:700,margin:"0 0 10px",color:"#8b5cf6"}}>Co-Supervised Students ({coStudents.length})</h3>
+          <DataTable cols={[
+            {label:"Student", render:r=><span style={{fontWeight:700}}>{r.initials} {r.surname}</span>},
+            {label:"Number",  render:r=><code style={{fontSize:12}}>{r.number}</code>},
+            {label:"Level",   render:r=><Pill label={r.level} bg="#ede9fe" color="#5b21b6"/>},
+            {label:"Primary Supervisor", render:r=>{const s=db.supervisors.find(x=>x.id===r.supervisorId);return s?<span style={{fontSize:12}}>{s.name}</span>:<span style={{color:"#94a3b8",fontSize:12}}>None</span>;}},
+            {label:"Reports", render:r=>db.submissions.filter(s=>s.studentId===r.id).length},
+          ]} rows={coStudents} empty="No co-supervised students."/>
+        </Pad>
+      )}
       {edit&&<StudentFormModal db={db} existing={edit} onClose={()=>setEdit(null)} showToast={showToast}/>}
+      {submitFor&&<SupSubmitModal db={db} student={submitFor} onClose={()=>setSubmitFor(null)} showToast={showToast}/>}
       {showPending&&(
         <Modal title={`Student Requests (${pending.length})`} onClose={()=>setShowPending(false)}>
           {pending.length===0?<p style={{color:"#94a3b8",fontSize:13}}>No pending requests.</p>:pending.map(s=>(
@@ -1138,7 +1812,7 @@ function SupStudents({db,session,myStudents,pending,showToast}){
 }
 
 function SupReports({db,myStudents,mySubs}){
-  const[view,setView]=useState(null);
+  const[view,setView]=useState(null);const[viewExt,setViewExt]=useState(null);
   const getStu=id=>myStudents.find(s=>s.id===id)||db.students.find(s=>s.id===id)||{};
   const rows=[...mySubs].reverse();
   const cols=[
@@ -1147,12 +1821,13 @@ function SupReports({db,myStudents,mySubs}){
     {label:"Score",   render:r=><span style={{fontWeight:800,color:sc(r.result?.overallScore||0)}}>{r.result?.overallScore??"-"}%</span>},
     {label:"Decision",render:r=>r.result?.supervisorDecision?<Pill label={r.result.supervisorDecision} bg={sb(r.result.overallScore||0)} color={dc2(r.result.supervisorDecision)}/>:"-"},
     {label:"Date",    render:r=><span style={{color:"#94a3b8",fontSize:12}}>{new Date(r.date).toLocaleDateString("en-ZA")}</span>},
-    {label:"",        render:r=><button onClick={()=>setView(r)} style={{background:"none",border:"none",cursor:"pointer",color:"#3b82f6"}}><Ic n="eye" size={14}/></button>},
+    {label:"",        render:r=><div style={{display:"flex",gap:5}}><button onClick={()=>setView(r)} style={{background:"none",border:"none",cursor:"pointer",color:"#3b82f6"}}><Ic n="eye" size={14}/></button>{r.extendedResult&&<button onClick={()=>setViewExt(r)} style={{background:"#ede9fe",border:"none",borderRadius:6,padding:"3px 7px",cursor:"pointer",color:"#4f46e5",fontSize:11,fontWeight:600}}>Ext</button>}</div>},
   ];
   return(
     <><PageHeader title="Student Reports"/>
     <Pad><DataTable cols={cols} rows={rows} empty="No reports from your students yet."/></Pad>
-    {view&&<FeedbackModal submission={view} students={[...myStudents,...db.students]} onClose={()=>setView(null)}/>}</>
+    {view&&<FeedbackModal submission={view} students={[...myStudents,...db.students]} onClose={()=>setView(null)}/>}
+    {viewExt&&<ExtendedFeedbackModal submission={viewExt} students={[...myStudents,...db.students]} onClose={()=>setViewExt(null)}/>}</>
   );
 }
 
@@ -1168,27 +1843,53 @@ function StudentPortal({db,session,onLogout,showToast}){
   const[needsSup,setNeedsSup]=useState(!stu.supervisorId&&!stu.requestedSupervisorId);
   const fileRef=useRef();
   const[file,setFile]=useState(null);const[text,setText]=useState("");
-  const[loading,setLoading]=useState(false);const[error,setError]=useState("");
-  const[viewSub,setViewSub]=useState(null);
+  const[loading,setLoading]=useState(false);const[loadingExt,setLoadingExt]=useState(false);
+  const[error,setError]=useState("");const[citStyle,setCitStyle]=useState("apa");
+  const[viewSub,setViewSub]=useState(null);const[viewExtSub,setViewExtSub]=useState(null);
 
   const mySubs=db.submissions.filter(s=>s.studentId===stu.id);
   const sup=db.supervisors.find(s=>s.id===stu.supervisorId);
   const reqSup=db.supervisors.find(s=>s.id===stu.requestedSupervisorId);
   const sl=STRICTNESS.find(l=>l.id===(stu.strictness||"strict"));
 
-  const handleFile=f=>{if(!f)return;setFile(f);setError("");const r=new FileReader();r.onload=e=>setText(e.target.result||"");r.readAsText(f);};
-  const handleSubmit=async()=>{
+  const handleFile=async f=>{
+    if(!f)return;setFile(f);setError("");setText("");
+    const ext=f.name.split(".").pop().toLowerCase();
+    try{
+      let extracted="";
+      if(ext==="docx"||ext==="doc"){
+        const buf=await f.arrayBuffer();
+        const res=await mammoth.extractRawText({arrayBuffer:buf});
+        extracted=res.value||"";
+      } else if(ext==="pdf"){
+        extracted=await extractPdfText(f);
+      } else {
+        extracted=await new Promise((res,rej)=>{const r=new FileReader();r.onload=e=>res(e.target.result||"");r.onerror=rej;r.readAsText(f);});
+      }
+      setText(extracted);
+      if(extracted.length>50000) setError("⚠ Large document ("+Math.round(extracted.length/1000)+"KB text). Only first ~14,000 characters will be analysed. Submit individual chapters for best results.");
+      else if(extracted.length<100) setError("⚠ Could not extract text from this file. Try converting to .docx or .txt first.");
+    }catch(e){setError("Could not read file: "+e.message);}
+  };
+  const[progress,setProgress]=useState("");
+  const handleSubmit=async(extended=false)=>{
     if(!text.trim())return setError("Upload a document first.");
-    setLoading(true);setError("");
+    extended?setLoadingExt(true):setLoading(true);setError("");setProgress("");
     try{
       const notes=(sup?`Supervisor: ${sup.name}. `:"")+( stu.extraPrompt||"");
-      const result=await analyzeDoc(text,stu,notes);
-      const sub={id:"sub_"+uid(),studentId:stu.id,filename:file?.name||"Document",date:new Date().toISOString(),result};
+      const result=await analyzeDoc(text,stu,notes,(cur,tot)=>setProgress(tot>1?`Analysing chunk ${cur} of ${tot}…`:"Analysing…"));
+      let extendedResult=null;
+      if(extended){
+        setProgress("Running extended review…");
+        extendedResult=await analyzeDocExtended(text,stu,citStyle,notes,(cur,tot)=>setProgress(`Extended review: chunk ${cur} of ${tot}…`));
+      }
+      const sub={id:"sub_"+uid(),studentId:stu.id,filename:file?.name||"Document",date:new Date().toISOString(),result,...(extendedResult?{extendedResult,citationStyle:citStyle}:{})};
       db.setSubmissions(prev=>[...prev,sub]);
-      setViewSub(sub);setFile(null);setText("");
-      showToast("Analysis complete!");
+      extended?setViewExtSub(sub):setViewSub(sub);
+      setFile(null);setText("");
+      showToast(extended?"Extended analysis complete!":"Analysis complete!");
     }catch(e){setError("Analysis failed: "+(e.message||"Please try again."));}
-    setLoading(false);
+    setLoading(false);setLoadingExt(false);
   };
 
   if(needsSetup) return <StudentFirstSetup stu={stu} db={db} onDone={()=>{setNeedsSetup(false);showToast("Account set up. Welcome!");}}/>;
@@ -1199,10 +1900,11 @@ function StudentPortal({db,session,onLogout,showToast}){
       <div style={{background:"#0f172a",padding:".9rem 1.5rem",display:"flex",alignItems:"center",justifyContent:"space-between"}}>
         <div style={{display:"flex",alignItems:"center",gap:10}}>
           <div style={{width:32,height:32,borderRadius:9,background:"#8b5cf6",display:"flex",alignItems:"center",justifyContent:"center"}}><Ic n="award" size={17} c="white"/></div>
-          <div><div style={{color:"white",fontWeight:700,fontSize:14}}>AcademiQ Analyser</div><div style={{color:"rgba(255,255,255,.4)",fontSize:11}}>{stu.initials} {stu.surname} · {stu.number}</div></div>
+          <div><div style={{color:"white",fontWeight:700,fontSize:14}}>AcademiQ Analyser</div><div style={{color:"rgba(255,255,255,.4)",fontSize:11}}>{stu.initials} {stu.surname} · {stu.number}{stu.institution?` · ${stu.institution}`:""}</div></div>
         </div>
         <div style={{display:"flex",alignItems:"center",gap:6,flexWrap:"wrap"}}>
           {sup?<span style={{background:"rgba(139,92,246,.25)",color:"#c4b5fd",padding:"3px 9px",borderRadius:99,fontSize:11,fontWeight:600}}>{stu.level} · {sup.name}</span>:reqSup?<span style={{background:"rgba(217,119,6,.2)",color:"#fcd34d",padding:"3px 9px",borderRadius:99,fontSize:11}}>Pending: {reqSup.name}</span>:null}
+          {(stu.coSupervisorIds||[]).length>0&&<span style={{background:"rgba(139,92,246,.15)",color:"#a78bfa",padding:"3px 9px",borderRadius:99,fontSize:11}}>+{stu.coSupervisorIds.length} co-sup</span>}
           {[["submit","Submit"],["history","My Reports"],["account","Account"]].map(([v,l])=><button key={v} onClick={()=>setView(v)} style={{background:view===v?"rgba(139,92,246,.25)":"rgba(255,255,255,.06)",border:"none",borderRadius:7,padding:"5px 10px",color:view===v?"#c4b5fd":"rgba(255,255,255,.45)",cursor:"pointer",fontSize:12,fontWeight:view===v?600:400}}>{l}</button>)}
           <button onClick={onLogout} style={{background:"rgba(255,255,255,.06)",border:"none",borderRadius:7,padding:"5px 9px",color:"rgba(255,255,255,.35)",cursor:"pointer",fontSize:12,display:"flex",alignItems:"center",gap:4}}><Ic n="logout" size={13} c="rgba(255,255,255,.35)"/>Out</button>
         </div>
@@ -1213,6 +1915,12 @@ function StudentPortal({db,session,onLogout,showToast}){
           <div style={{background:"white",borderRadius:16,border:"1px solid #e2e8f0",padding:"1.75rem"}}>
             <h2 style={{fontSize:16,fontWeight:700,marginBottom:4}}>Submit Your Project</h2>
             <p style={{fontSize:13,color:"#64748b",marginBottom:16}}>Upload your project document for AI-powered analysis.</p>
+            <div style={{marginBottom:13}}>
+              <label style={LS}>Citation Style Used in Your Document</label>
+              <select value={citStyle} onChange={e=>setCitStyle(e.target.value)} style={IS}>
+                {CITATION_STYLES.map(s=><option key={s.id} value={s.id}>{s.label}</option>)}
+              </select>
+            </div>
             <div style={{background:"#f8fafc",borderRadius:10,padding:"10px 13px",marginBottom:16,display:"flex",gap:11,alignItems:"flex-start"}}>
               <div style={{width:32,height:32,borderRadius:8,background:(sl?.color||"#d97706")+"20",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}><Ic n="settings" size={15} c={sl?.color||"#d97706"}/></div>
               <div><div style={{fontSize:13,fontWeight:700}}><span style={{color:sl?.color||"#d97706"}}>{sl?.label}</span> analyser</div><div style={{fontSize:12,color:"#64748b"}}>{sl?.desc}</div>{(stu.fields||[]).length>0&&<div style={{fontSize:11,color:"#94a3b8",marginTop:3}}>{stu.fields.join(" · ")}</div>}</div>
@@ -1223,10 +1931,17 @@ function StudentPortal({db,session,onLogout,showToast}){
               <div style={{marginTop:9,fontWeight:600,color:file?"#5b21b6":"#374151",fontSize:14}}>{file?file.name:"Drop your document here or click to browse"}</div>
               <div style={{fontSize:12,color:"#94a3b8",marginTop:3}}>{file?`${(file.size/1024).toFixed(1)} KB`:"Supported: .txt .md .pdf .docx"}</div>
             </div>
-            {error&&<div style={{background:"#fee2e2",color:"#991b1b",borderRadius:8,padding:"9px 13px",fontSize:13,marginTop:11}}>{error}</div>}
-            <button onClick={handleSubmit} disabled={!text||loading} style={{...BP,marginTop:13,background:"linear-gradient(135deg,#8b5cf6,#7c3aed)",display:"flex",alignItems:"center",justifyContent:"center",gap:7,opacity:(!text||loading)?0.6:1,cursor:(!text||loading)?"not-allowed":"pointer"}}>
-              {loading?<><div style={{animation:"spin 1s linear infinite",display:"inline-flex"}}><Ic n="spin" size={15} c="white"/></div>Analysing…</>:<><Ic n="chart" size={15} c="white"/> Submit for Analysis</>}
-            </button>
+            {progress&&(loading||loadingExt)&&<div style={{background:"#eff6ff",color:"#1e40af",borderRadius:8,padding:"9px 13px",fontSize:13,marginTop:11,display:"flex",alignItems:"center",gap:8}}><div style={{animation:"spin 1s linear infinite",display:"inline-flex"}}><Ic n="spin" size={14} c="#3b82f6"/></div>{progress}</div>}
+            {error&&!loading&&!loadingExt&&<div style={{background:"#fee2e2",color:"#991b1b",borderRadius:8,padding:"9px 13px",fontSize:13,marginTop:11}}>{error}</div>}
+            <div style={{display:"flex",gap:8,marginTop:13}}>
+              <button onClick={()=>handleSubmit(false)} disabled={!text||loading||loadingExt} style={{...BP,flex:1,background:"linear-gradient(135deg,#8b5cf6,#7c3aed)",display:"flex",alignItems:"center",justifyContent:"center",gap:6,opacity:(!text||loading||loadingExt)?0.6:1,cursor:(!text||loading||loadingExt)?"not-allowed":"pointer"}}>
+                {loading?<><div style={{animation:"spin 1s linear infinite",display:"inline-flex"}}><Ic n="spin" size={14} c="white"/></div>Analysing…</>:<><Ic n="chart" size={14} c="white"/>Standard Analysis</>}
+              </button>
+              <button onClick={()=>handleSubmit(true)} disabled={!text||loading||loadingExt} style={{...BP,flex:1,background:"linear-gradient(135deg,#4f46e5,#3730a3)",display:"flex",alignItems:"center",justifyContent:"center",gap:6,opacity:(!text||loading||loadingExt)?0.6:1,cursor:(!text||loading||loadingExt)?"not-allowed":"pointer"}}>
+                {loadingExt?<><div style={{animation:"spin 1s linear infinite",display:"inline-flex"}}><Ic n="spin" size={14} c="white"/></div>Extended…</>:<><Ic n="award" size={14} c="white"/>+ Extended Review</>}
+              </button>
+            </div>
+            <p style={{fontSize:11,color:"#94a3b8",marginTop:6}}>Extended Review adds language, citation verification, AI detection and literature review analysis.</p>
           </div>
         )}
 
@@ -1235,10 +1950,12 @@ function StudentPortal({db,session,onLogout,showToast}){
             <div style={{padding:".8rem 1.2rem",borderBottom:"1px solid #f1f5f9"}}><h3 style={{margin:0,fontSize:14,fontWeight:700}}>My Reports</h3></div>
             {mySubs.length===0?<div style={{padding:"2.5rem",textAlign:"center",color:"#94a3b8",fontSize:13}}>No reports submitted yet.</div>:(
               [...mySubs].reverse().map(sub=>(
-                <div key={sub.id} onClick={()=>setViewSub(sub)} style={{padding:"12px 17px",borderBottom:"1px solid #f8fafc",cursor:"pointer",display:"flex",alignItems:"center",gap:13}} onMouseEnter={e=>e.currentTarget.style.background="#f8fafc"} onMouseLeave={e=>e.currentTarget.style.background="white"}>
+                <div key={sub.id} style={{padding:"12px 17px",borderBottom:"1px solid #f8fafc",display:"flex",alignItems:"center",gap:13}}>
                   <Ic n="file" size={18} c="#8b5cf6"/>
-                  <div style={{flex:1}}><div style={{fontWeight:600,fontSize:14}}>{sub.filename}</div><div style={{fontSize:12,color:"#94a3b8"}}>{new Date(sub.date).toLocaleDateString("en-ZA",{weekday:"short",year:"numeric",month:"short",day:"numeric"})}</div></div>
+                  <Ic n="file" size={18} c="#8b5cf6"/>
+                  <div style={{flex:1,cursor:"pointer"}} onClick={()=>setViewSub(sub)}><div style={{fontWeight:600,fontSize:14}}>{sub.filename}{sub.submittedBy==="supervisor"&&<span style={{fontSize:10,background:"#dbeafe",color:"#1e40af",padding:"1px 6px",borderRadius:99,marginLeft:6,fontWeight:600}}>by supervisor</span>}</div><div style={{fontSize:12,color:"#94a3b8"}}>{new Date(sub.date).toLocaleDateString("en-ZA",{weekday:"short",year:"numeric",month:"short",day:"numeric"})}</div></div>
                   <div style={{textAlign:"right"}}><div style={{fontSize:19,fontWeight:800,color:sc(sub.result?.overallScore||0)}}>{sub.result?.overallScore??"-"}%</div>{sub.result?.supervisorDecision&&<div style={{fontSize:11,color:dc2(sub.result.supervisorDecision),fontWeight:600}}>{sub.result.supervisorDecision}</div>}</div>
+                  {sub.extendedResult&&<button onClick={()=>setViewExtSub(sub)} style={{background:"linear-gradient(135deg,#4f46e5,#3730a3)",border:"none",borderRadius:7,padding:"5px 9px",cursor:"pointer",color:"white",fontSize:11,fontWeight:600,whiteSpace:"nowrap"}}>Extended ↗</button>}
                   <Ic n="chevron" size={14} c="#cbd5e1"/>
                 </div>
               ))
@@ -1250,6 +1967,7 @@ function StudentPortal({db,session,onLogout,showToast}){
       </div>
 
       {viewSub&&<FeedbackModal submission={viewSub} students={db.students} onClose={()=>setViewSub(null)}/>}
+      {viewExtSub&&<ExtendedFeedbackModal submission={viewExtSub} students={db.students} onClose={()=>setViewExtSub(null)}/>}
       <style>{"@keyframes spin{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}"}</style>
     </div>
   );
@@ -1350,7 +2068,7 @@ function StudentAccountPage({stu,db,showToast}){
       <div style={{background:"white",borderRadius:13,border:"1px solid #e2e8f0",padding:"1.2rem",marginBottom:13}}>
         <h3 style={{margin:"0 0 11px",fontSize:14,fontWeight:700}}>Account Details</h3>
         <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:9}}>
-          {[["Name",`${stu.initials} ${stu.surname}`],["Number",stu.number],["Level",stu.level],["Supervisor",sup?.name||(reqSup?`Pending: ${reqSup.name}`:"None")]].map(([k,v])=>(
+          {[["Name",`${stu.initials} ${stu.surname}`],["Number",stu.number],["Institution",stu.institution||"—"],["Level",stu.level],["Supervisor",sup?.name||(reqSup?`Pending: ${reqSup.name}`:"None")],["Co-Supervisors",(stu.coSupervisorIds||[]).map(id=>db.supervisors.find(s=>s.id===id)?.name).filter(Boolean).join(", ")||"None"]].map(([k,v])=>(
             <div key={k} style={{background:"#f8fafc",borderRadius:8,padding:"8px 10px"}}>
               <div style={{fontSize:11,color:"#94a3b8",fontWeight:600,marginBottom:2}}>{k}</div>
               <div style={{fontWeight:700,fontSize:13}}>{v}</div>
