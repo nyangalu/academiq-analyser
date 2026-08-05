@@ -106,36 +106,346 @@ function useFirebase(collection) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// CLAUDE API
+// CLAUDE API — chunked analysis engine
 // ═══════════════════════════════════════════════════════════════════════
 
-async function analyzeDoc(text, student, supNotes) {
+const LEVEL_LABELS = {Diploma:"National Diploma","Advanced Diploma":"Advanced Diploma",PGDip:"Postgraduate Diploma",BEng:"Bachelor of Engineering",MEng:"Master of Engineering",PhD:"Doctor of Philosophy"};
+const levelLabel = student => LEVEL_LABELS[student.level] || student.level;
+
+// Documents at or under this size are analysed in a single pass (unchanged from original behaviour).
+const SINGLE_PASS_LIMIT = 14000;
+// Above that, the document is split into overlapping chunks and processed via map → reduce.
+const CHUNK_SIZE = 12000;
+const CHUNK_OVERLAP = 400;
+const MAX_CHUNKS = 12; // caps total original-document coverage at roughly 12 * (12000-400) ≈ 139,000 characters
+
+function chunkText(text, size = CHUNK_SIZE, overlap = CHUNK_OVERLAP, maxChunks = MAX_CHUNKS) {
+  if (text.length <= size) return [text];
+  const chunks = [];
+  let start = 0;
+  while (start < text.length && chunks.length < maxChunks) {
+    const end = Math.min(start + size, text.length);
+    chunks.push(text.slice(start, end));
+    if (end >= text.length) break;
+    start = end - overlap;
+  }
+  return chunks;
+}
+
+async function callClaudeAPI(prompt, system, maxTokens = 4000) {
+  const r = await fetch("/api/analyse", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ prompt, system, maxTokens }),
+  });
+  if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(e.error || "Server error " + r.status); }
+  const d = await r.json();
+  return (d.text || "").replace(/```json|```/g, "").trim();
+}
+
+function parseJsonLoose(raw, failMessage) {
+  try { return JSON.parse(raw); } catch (e) {
+    const repairs = [raw + '"]}', raw + '"}]}', raw + '"]}]}', raw.replace(/,\s*$/, "") + "}}}", raw.replace(/,\s*$/, "") + "}}}}", raw.replace(/,\s*$/, "") + "}}}}}", raw.replace(/,\s*$/, "") + "}}}}}}"];
+    for (const a of repairs) { try { return JSON.parse(a); } catch (e2) {} }
+    throw new Error(failMessage || "Could not parse the AI response as JSON.");
+  }
+}
+
+// ── Single-pass (document fits in one call) ─────────────────────────────
+
+async function analyzeDocSingle(text, student, supNotes) {
   const sys = STRICTNESS_PROMPTS[student.strictness || "strict"];
   const fields = (student.fields || []).join(", ") || "Engineering";
-  const lvMap = {Diploma:"National Diploma","Advanced Diploma":"Advanced Diploma",PGDip:"Postgraduate Diploma",BEng:"Bachelor of Engineering",MEng:"Master of Engineering",PhD:"Doctor of Philosophy"};
-  const level = lvMap[student.level] || student.level;
+  const level = levelLabel(student);
   const prompt = `Analyse this ${level} engineering project in ${fields} for ${student.initials} ${student.surname} (${student.number}) at a South African university.
 ${student.rubric ? `\nRUBRIC:\n${student.rubric}\n` : ""}
 ${supNotes ? `\nSUPERVISOR NOTES:\n${supNotes}\n` : ""}
 PROJECT TEXT:
 ---
-${text.slice(0, 14000)}
+${text}
 ---
 Return ONLY valid JSON:
 {"overallScore":<0-100>,"overallGrade":"<F|D|C|B|A|A+>","overallVerdict":"<2-3 sentences>","supervisorDecision":"<APPROVED|MINOR REVISIONS|MAJOR REVISIONS|NOT APPROVED>","sections":[{"name":"<n>","score":<0-100>,"grade":"<F|D|C|B|A>","strengths":["<s>"],"weaknesses":["<w>"],"supervisorInstruction":"<inst>"}],"criticalIssues":["<i>"],"positives":["<p>"],"priorityActions":[{"priority":"Critical|Serious|Important|Minor","action":"<a>"}],"disciplinaryAssessment":"<para>","ecsa_ga_notes":"<para>"}`;
-  const r = await fetch("/api/analyse", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ prompt, system: sys, maxTokens: 8000 }),
-  });
-  if (!r.ok) { const e=await r.json().catch(()=>({})); throw new Error(e.error||"Server error "+r.status); }
-  const d = await r.json();
-  const raw = (d.text||"").replace(/```json|```/g,"").trim();
-  try { return JSON.parse(raw); } catch(e) {
-    const repairs=[raw+'"]}',raw+'"}]}',raw+'"]}]}',raw.replace(/,\s*$/,"")+"}}}",raw.replace(/,\s*$/,"")+"}}}}"];
-    for(const a of repairs){try{return JSON.parse(a);}catch(e2){}}
-    throw new Error("Document may be too large. Try submitting one chapter at a time (under 500KB recommended).");
+  const raw = await callClaudeAPI(prompt, sys, 8000);
+  return parseJsonLoose(raw, "Document may be too large. Try submitting one chapter at a time (under 500KB recommended).");
+}
+
+async function analyzeDocExtendedSingle(text, student, citationStyle, supNotes) {
+  const fields = (student.fields || []).join(", ") || "Engineering";
+  const level = levelLabel(student);
+  const styleLabel = CITATION_STYLES.find(s => s.id === citationStyle)?.label || citationStyle;
+  const prompt = `You are an expert academic editor and plagiarism/AI detection specialist conducting a comprehensive editorial review of a ${level} engineering project in ${fields} for ${student.initials} ${student.surname} (${student.number}) at a South African university.
+
+Citation style declared: ${styleLabel}
+${supNotes ? `Supervisor notes: ${supNotes}` : ""}
+
+PROJECT TEXT (full):
+---
+${text}
+---
+
+Conduct the following comprehensive review and return ONLY valid JSON (no markdown):
+
+{
+  "languageReview": {
+    "overallLanguageScore": <0-100>,
+    "spellingErrors": [{"original":"<wrong>","correction":"<right>","context":"<surrounding text snippet>"}],
+    "grammarErrors": [{"issue":"<description>","location":"<text snippet>","suggestion":"<corrected version>"}],
+    "styleIssues": [{"type":"<Wordiness|Passive voice|Ambiguity|etc>","location":"<text snippet>","suggestion":"<improvement>"}],
+    "readabilityScore": <0-100>,
+    "readabilityComment": "<paragraph>"
+  },
+  "literatureReview": {
+    "funnelApproachScore": <0-100>,
+    "funnelApproachComment": "<paragraph — does it move from broad to specific?>",
+    "relevanceScore": <0-100>,
+    "relevanceComment": "<paragraph — are sources relevant to the topic?>",
+    "criticalAnalysisScore": <0-100>,
+    "criticalAnalysisComment": "<paragraph — does student critically analyse or just summarise?>",
+    "flowScore": <0-100>,
+    "flowComment": "<paragraph — does literature review flow logically?>",
+    "gaps": ["<gap or missing aspect>"],
+    "strengths": ["<strength>"]
+  },
+  "citationReview": {
+    "declaredStyle": "${styleLabel}",
+    "overallCitationScore": <0-100>,
+    "inTextCitations": [
+      {
+        "citation": "<exact in-text citation as it appears>",
+        "location": "<surrounding sentence>",
+        "isCorrect": <true|false>,
+        "issue": "<null or description of problem>",
+        "correction": "<null or corrected version>",
+        "referenceKey": "<surname/number that links to references list>",
+        "searchQuery": "<best Google Scholar search query to find this source>"
+      }
+    ],
+    "referenceList": [
+      {
+        "key": "<surname or number>",
+        "fullReference": "<full reference as it appears in document>",
+        "isCorrect": <true|false>,
+        "issue": "<null or formatting problem>",
+        "correction": "<null or corrected version>",
+        "searchQuery": "<Google Scholar search query>",
+        "doiOrUrl": "<DOI or URL if found in text, else null>"
+      }
+    ],
+    "missingReferences": ["<citation that appears in text but not in reference list>"],
+    "orphanedReferences": ["<reference in list but not cited in text>"],
+    "citationIssuesSummary": "<paragraph>"
+  },
+  "aiDetection": {
+    "estimatedAiPercentage": <0-100>,
+    "confidence": "<Low|Medium|High>",
+    "aiSections": [
+      {
+        "section": "<section name or heading>",
+        "excerpt": "<first 120 chars of suspected AI text>",
+        "likelihood": "<Low|Medium|High>",
+        "indicators": ["<indicator 1>","<indicator 2>"]
+      }
+    ],
+    "humanSections": ["<section or aspect that reads as genuinely human-written>"],
+    "aiComment": "<overall paragraph about AI usage patterns detected>"
+  },
+  "informationFlow": {
+    "overallFlowScore": <0-100>,
+    "sectionFlow": [
+      {"section":"<name>","flowScore":<0-100>,"comment":"<brief>","issue":"<null or problem>"}
+    ],
+    "transitionQuality": "<Poor|Fair|Good|Excellent>",
+    "logicalProgressionComment": "<paragraph>",
+    "recommendations": ["<recommendation>"]
+  },
+  "editorialSummary": "<2-3 paragraph overall editorial verdict>",
+  "priorityCorrections": [
+    {"priority":"Critical|Serious|Important|Minor","type":"<Language|Citation|AI|Flow|LitReview>","action":"<specific action required>"}
+  ]
+}`;
+  const raw = await callClaudeAPI(prompt, "You are an expert academic editor, citation specialist, and AI-content detection analyst. Be thorough, specific and precise. Always return valid JSON only.", 8000);
+  return parseJsonLoose(raw, "Document too large for extended analysis in one pass. Submit one chapter at a time.");
+}
+
+// ── Map phase: summarise each fragment of a large document ──────────────
+
+async function mapChunkSummary(chunk, index, total, student) {
+  const level = levelLabel(student);
+  const prompt = `You are assisting with a chunked review of a large ${level} engineering document. This is FRAGMENT ${index + 1} of ${total} of the SAME document (it was split purely for processing length — treat it as a slice of a larger whole, not a standalone document).
+
+FRAGMENT TEXT:
+---
+${chunk}
+---
+
+Return ONLY valid JSON summarising this fragment:
+{"likelySection":"<Introduction|Literature Review|Methodology|Results|Discussion|Conclusion|References|Appendix|Mixed/Unclear>","summary":"<4-6 sentence factual summary of what this fragment covers>","strengths":["<specific strength observed in this fragment, with a short quoted/paraphrased example if useful>"],"weaknesses":["<specific weakness or issue observed in this fragment>"],"notableCitations":["<citation exactly as it appears, or omit if none>"],"languageNotes":["<spelling/grammar/style issue observed, with the exact snippet, or omit if none>"]}`;
+  const raw = await callClaudeAPI(prompt, "You are a meticulous academic reviewer producing structured notes on one fragment of a larger document. Return only JSON.", 1500);
+  return parseJsonLoose(raw, `Could not process section ${index + 1} of ${total}.`);
+}
+
+const digestChunks = summaries => summaries.map((c, i) =>
+  `--- Fragment ${i + 1}/${summaries.length} (${c.likelySection || "Unclear"}) ---\n` +
+  `Summary: ${c.summary || "—"}\n` +
+  `Strengths: ${(c.strengths || []).join("; ") || "none noted"}\n` +
+  `Weaknesses: ${(c.weaknesses || []).join("; ") || "none noted"}` +
+  (c.notableCitations?.length ? `\nCitations seen: ${c.notableCitations.join("; ")}` : "") +
+  (c.languageNotes?.length ? `\nLanguage notes: ${c.languageNotes.join("; ")}` : "")
+).join("\n\n");
+
+// ── Reduce phase: synthesise the final report from all fragment notes ───
+
+async function reduceStandardFromChunks(chunkSummaries, student, supNotes) {
+  const sys = STRICTNESS_PROMPTS[student.strictness || "strict"];
+  const fields = (student.fields || []).join(", ") || "Engineering";
+  const level = levelLabel(student);
+  const digest = digestChunks(chunkSummaries);
+  const prompt = `Analyse this ${level} engineering project in ${fields} for ${student.initials} ${student.surname} (${student.number}) at a South African university.
+${student.rubric ? `\nRUBRIC:\n${student.rubric}\n` : ""}
+${supNotes ? `\nSUPERVISOR NOTES:\n${supNotes}\n` : ""}
+This document was too large to read in a single pass, so it was split into ${chunkSummaries.length} sequential fragments covering the FULL document end-to-end, and each fragment was pre-analysed. Below are the fragment-by-fragment notes. Synthesise ONE holistic assessment of the WHOLE document from these notes, exactly as if you had read the entire document directly — do not mention that it was split into fragments anywhere in your output.
+
+FRAGMENT-BY-FRAGMENT NOTES:
+${digest}
+
+Return ONLY valid JSON:
+{"overallScore":<0-100>,"overallGrade":"<F|D|C|B|A|A+>","overallVerdict":"<2-3 sentences>","supervisorDecision":"<APPROVED|MINOR REVISIONS|MAJOR REVISIONS|NOT APPROVED>","sections":[{"name":"<n>","score":<0-100>,"grade":"<F|D|C|B|A>","strengths":["<s>"],"weaknesses":["<w>"],"supervisorInstruction":"<inst>"}],"criticalIssues":["<i>"],"positives":["<p>"],"priorityActions":[{"priority":"Critical|Serious|Important|Minor","action":"<a>"}],"disciplinaryAssessment":"<para>","ecsa_ga_notes":"<para>"}`;
+  const raw = await callClaudeAPI(prompt, sys, 8000);
+  return parseJsonLoose(raw, "Could not synthesise the final report from the analysed sections.");
+}
+
+async function reduceExtendedFromChunks(chunkSummaries, student, citationStyle, supNotes) {
+  const fields = (student.fields || []).join(", ") || "Engineering";
+  const level = levelLabel(student);
+  const styleLabel = CITATION_STYLES.find(s => s.id === citationStyle)?.label || citationStyle;
+  const digest = digestChunks(chunkSummaries);
+  const prompt = `You are an expert academic editor and plagiarism/AI detection specialist conducting a comprehensive editorial review of a ${level} engineering project in ${fields} for ${student.initials} ${student.surname} (${student.number}) at a South African university.
+
+Citation style declared: ${styleLabel}
+${supNotes ? `Supervisor notes: ${supNotes}` : ""}
+
+This document was too large to read in a single pass, so it was split into ${chunkSummaries.length} sequential fragments covering the FULL document end-to-end, and each fragment was pre-analysed (including any citations and language issues spotted in that fragment). Below are the fragment-by-fragment notes. Synthesise ONE holistic editorial review of the WHOLE document from these notes, exactly as if you had read the entire document directly — do not mention that it was split into fragments anywhere in your output.
+
+FRAGMENT-BY-FRAGMENT NOTES:
+${digest}
+
+Conduct the following comprehensive review and return ONLY valid JSON (no markdown):
+
+{
+  "languageReview": {
+    "overallLanguageScore": <0-100>,
+    "spellingErrors": [{"original":"<wrong>","correction":"<right>","context":"<surrounding text snippet>"}],
+    "grammarErrors": [{"issue":"<description>","location":"<text snippet>","suggestion":"<corrected version>"}],
+    "styleIssues": [{"type":"<Wordiness|Passive voice|Ambiguity|etc>","location":"<text snippet>","suggestion":"<improvement>"}],
+    "readabilityScore": <0-100>,
+    "readabilityComment": "<paragraph>"
+  },
+  "literatureReview": {
+    "funnelApproachScore": <0-100>,
+    "funnelApproachComment": "<paragraph — does it move from broad to specific?>",
+    "relevanceScore": <0-100>,
+    "relevanceComment": "<paragraph — are sources relevant to the topic?>",
+    "criticalAnalysisScore": <0-100>,
+    "criticalAnalysisComment": "<paragraph — does student critically analyse or just summarise?>",
+    "flowScore": <0-100>,
+    "flowComment": "<paragraph — does literature review flow logically?>",
+    "gaps": ["<gap or missing aspect>"],
+    "strengths": ["<strength>"]
+  },
+  "citationReview": {
+    "declaredStyle": "${styleLabel}",
+    "overallCitationScore": <0-100>,
+    "inTextCitations": [
+      {
+        "citation": "<exact in-text citation as it appears>",
+        "location": "<surrounding sentence>",
+        "isCorrect": <true|false>,
+        "issue": "<null or description of problem>",
+        "correction": "<null or corrected version>",
+        "referenceKey": "<surname/number that links to references list>",
+        "searchQuery": "<best Google Scholar search query to find this source>"
+      }
+    ],
+    "referenceList": [
+      {
+        "key": "<surname or number>",
+        "fullReference": "<full reference as it appears in document>",
+        "isCorrect": <true|false>,
+        "issue": "<null or formatting problem>",
+        "correction": "<null or corrected version>",
+        "searchQuery": "<Google Scholar search query>",
+        "doiOrUrl": "<DOI or URL if found in text, else null>"
+      }
+    ],
+    "missingReferences": ["<citation that appears in text but not in reference list>"],
+    "orphanedReferences": ["<reference in list but not cited in text>"],
+    "citationIssuesSummary": "<paragraph>"
+  },
+  "aiDetection": {
+    "estimatedAiPercentage": <0-100>,
+    "confidence": "<Low|Medium|High>",
+    "aiSections": [
+      {
+        "section": "<section name or heading>",
+        "excerpt": "<first 120 chars of suspected AI text>",
+        "likelihood": "<Low|Medium|High>",
+        "indicators": ["<indicator 1>","<indicator 2>"]
+      }
+    ],
+    "humanSections": ["<section or aspect that reads as genuinely human-written>"],
+    "aiComment": "<overall paragraph about AI usage patterns detected>"
+  },
+  "informationFlow": {
+    "overallFlowScore": <0-100>,
+    "sectionFlow": [
+      {"section":"<name>","flowScore":<0-100>,"comment":"<brief>","issue":"<null or problem>"}
+    ],
+    "transitionQuality": "<Poor|Fair|Good|Excellent>",
+    "logicalProgressionComment": "<paragraph>",
+    "recommendations": ["<recommendation>"]
+  },
+  "editorialSummary": "<2-3 paragraph overall editorial verdict>",
+  "priorityCorrections": [
+    {"priority":"Critical|Serious|Important|Minor","type":"<Language|Citation|AI|Flow|LitReview>","action":"<specific action required>"}
+  ]
+}`;
+  const raw = await callClaudeAPI(prompt, "You are an expert academic editor, citation specialist, and AI-content detection analyst. Be thorough, specific and precise. Always return valid JSON only.", 8000);
+  return parseJsonLoose(raw, "Could not synthesise the final extended review from the analysed sections.");
+}
+
+// ── Orchestrator — used by every submission path (student/supervisor/admin/co-supervisor) ──
+
+async function analyzeSubmission(text, student, supNotes, opts = {}) {
+  const { extended = false, citationStyle = "apa", onProgress } = opts;
+  const report = txt => onProgress?.(txt);
+
+  if (text.length <= SINGLE_PASS_LIMIT) {
+    report(extended ? "Analysing…" : "Analysing…");
+    const result = await analyzeDocSingle(text, student, supNotes);
+    let extendedResult = null;
+    if (extended) {
+      report("Running extended review…");
+      extendedResult = await analyzeDocExtendedSingle(text, student, citationStyle, supNotes);
+    }
+    return { result, extendedResult, chunked: false, chunksUsed: 1, charsAnalysed: text.length, totalChars: text.length };
   }
+
+  const chunks = chunkText(text);
+  const chunkSummaries = [];
+  for (let i = 0; i < chunks.length; i++) {
+    report(`Analysing section ${i + 1} of ${chunks.length}…`);
+    chunkSummaries.push(await mapChunkSummary(chunks[i], i, chunks.length, student));
+  }
+  report("Synthesising full report…");
+  const result = await reduceStandardFromChunks(chunkSummaries, student, supNotes);
+  let extendedResult = null;
+  if (extended) {
+    report("Synthesising extended review…");
+    extendedResult = await reduceExtendedFromChunks(chunkSummaries, student, citationStyle, supNotes);
+  }
+  const charsAnalysed = CHUNK_SIZE + (chunks.length - 1) * (CHUNK_SIZE - CHUNK_OVERLAP);
+  return { result, extendedResult, chunked: true, chunksUsed: chunks.length, charsAnalysed: Math.min(charsAnalysed, text.length), totalChars: text.length };
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -782,7 +1092,7 @@ function writeStandardReport(w, submission, student) {
   if (!r) return;
   w.h1("Assessment Report");
   w.para(`${student.initials || ""} ${student.surname || ""}  ·  ${student.number || ""}  ·  ${student.level || ""}`, { size: 10, bold: true, color: "#0f172a", gap: 2 });
-  w.para(`${submission.filename || "Document"}  ·  Submitted ${new Date(submission.date).toLocaleDateString("en-ZA")}${submission.submittedBy ? "  ·  Submitted by " + submission.submittedBy : ""}`, { size: 9, color: "#64748b", gap: 8 });
+  w.para(`${submission.filename || "Document"}  ·  Submitted ${new Date(submission.date).toLocaleDateString("en-ZA")}${submission.submittedBy ? "  ·  Submitted by " + submission.submittedBy : ""}${submission.chunked ? "  ·  Full document analysed in " + submission.chunksUsed + " sections" : ""}`, { size: 9, color: "#64748b", gap: 8 });
   w.rule();
 
   w.h2("Overall Result");
@@ -916,121 +1226,6 @@ const CITATION_STYLES = [
 ];
 
 // ═══════════════════════════════════════════════════════════════════════
-// EXTENDED REVIEW API CALL
-// ═══════════════════════════════════════════════════════════════════════
-
-async function analyzeDocExtended(text, student, citationStyle, supNotes) {
-  const fields = (student.fields||[]).join(", ")||"Engineering";
-  const lvMap = {Diploma:"National Diploma","Advanced Diploma":"Advanced Diploma",PGDip:"Postgraduate Diploma",BEng:"Bachelor of Engineering",MEng:"Master of Engineering",PhD:"Doctor of Philosophy"};
-  const level = lvMap[student.level]||student.level;
-  const styleLabel = CITATION_STYLES.find(s=>s.id===citationStyle)?.label||citationStyle;
-
-  const prompt = `You are an expert academic editor and plagiarism/AI detection specialist conducting a comprehensive editorial review of a ${level} engineering project in ${fields} for ${student.initials} ${student.surname} (${student.number}) at a South African university.
-
-Citation style declared: ${styleLabel}
-${supNotes?`Supervisor notes: ${supNotes}`:""}
-
-PROJECT TEXT (full):
----
-${text.slice(0,14000)}
----
-
-Conduct the following comprehensive review and return ONLY valid JSON (no markdown):
-
-{
-  "languageReview": {
-    "overallLanguageScore": <0-100>,
-    "spellingErrors": [{"original":"<wrong>","correction":"<right>","context":"<surrounding text snippet>"}],
-    "grammarErrors": [{"issue":"<description>","location":"<text snippet>","suggestion":"<corrected version>"}],
-    "styleIssues": [{"type":"<Wordiness|Passive voice|Ambiguity|etc>","location":"<text snippet>","suggestion":"<improvement>"}],
-    "readabilityScore": <0-100>,
-    "readabilityComment": "<paragraph>"
-  },
-  "literatureReview": {
-    "funnelApproachScore": <0-100>,
-    "funnelApproachComment": "<paragraph — does it move from broad to specific?>",
-    "relevanceScore": <0-100>,
-    "relevanceComment": "<paragraph — are sources relevant to the topic?>",
-    "criticalAnalysisScore": <0-100>,
-    "criticalAnalysisComment": "<paragraph — does student critically analyse or just summarise?>",
-    "flowScore": <0-100>,
-    "flowComment": "<paragraph — does literature review flow logically?>",
-    "gaps": ["<gap or missing aspect>"],
-    "strengths": ["<strength>"]
-  },
-  "citationReview": {
-    "declaredStyle": "${styleLabel}",
-    "overallCitationScore": <0-100>,
-    "inTextCitations": [
-      {
-        "citation": "<exact in-text citation as it appears>",
-        "location": "<surrounding sentence>",
-        "isCorrect": <true|false>,
-        "issue": "<null or description of problem>",
-        "correction": "<null or corrected version>",
-        "referenceKey": "<surname/number that links to references list>",
-        "searchQuery": "<best Google Scholar search query to find this source>"
-      }
-    ],
-    "referenceList": [
-      {
-        "key": "<surname or number>",
-        "fullReference": "<full reference as it appears in document>",
-        "isCorrect": <true|false>,
-        "issue": "<null or formatting problem>",
-        "correction": "<null or corrected version>",
-        "searchQuery": "<Google Scholar search query>",
-        "doiOrUrl": "<DOI or URL if found in text, else null>"
-      }
-    ],
-    "missingReferences": ["<citation that appears in text but not in reference list>"],
-    "orphanedReferences": ["<reference in list but not cited in text>"],
-    "citationIssuesSummary": "<paragraph>"
-  },
-  "aiDetection": {
-    "estimatedAiPercentage": <0-100>,
-    "confidence": "<Low|Medium|High>",
-    "aiSections": [
-      {
-        "section": "<section name or heading>",
-        "excerpt": "<first 120 chars of suspected AI text>",
-        "likelihood": "<Low|Medium|High>",
-        "indicators": ["<indicator 1>","<indicator 2>"]
-      }
-    ],
-    "humanSections": ["<section or aspect that reads as genuinely human-written>"],
-    "aiComment": "<overall paragraph about AI usage patterns detected>"
-  },
-  "informationFlow": {
-    "overallFlowScore": <0-100>,
-    "sectionFlow": [
-      {"section":"<name>","flowScore":<0-100>,"comment":"<brief>","issue":"<null or problem>"}
-    ],
-    "transitionQuality": "<Poor|Fair|Good|Excellent>",
-    "logicalProgressionComment": "<paragraph>",
-    "recommendations": ["<recommendation>"]
-  },
-  "editorialSummary": "<2-3 paragraph overall editorial verdict>",
-  "priorityCorrections": [
-    {"priority":"Critical|Serious|Important|Minor","type":"<Language|Citation|AI|Flow|LitReview>","action":"<specific action required>"}
-  ]
-}`;
-
-  const r = await fetch("/api/analyse",{
-    method:"POST",
-    headers:{"Content-Type":"application/json"},
-    body:JSON.stringify({prompt, system:"You are an expert academic editor, citation specialist, and AI-content detection analyst. Be thorough, specific and precise. Always return valid JSON only.", maxTokens:8000}),
-  });
-  const d = await r.json();
-  const raw=(d.content||[]).map(b=>b.text||"").join("").replace(/```json|```/g,"").trim();
-  try { return JSON.parse(raw); } catch(e) {
-    const repairs=[raw+'"]}',raw+'"}]}',raw+'"]}]}',raw.replace(/,\s*$/,"")+"}}}}}",raw.replace(/,\s*$/,"")+"}}}}}}"];
-    for(const a of repairs){try{return JSON.parse(a);}catch(e2){}}
-    throw new Error("Document too large for extended analysis. Submit one chapter at a time.");
-  }
-}
-
-// ═══════════════════════════════════════════════════════════════════════
 // EXTENDED FEEDBACK MODAL
 // ═══════════════════════════════════════════════════════════════════════
 
@@ -1067,6 +1262,7 @@ function ExtendedFeedbackModal({submission,students,onClose}){
               <span style={{background:"rgba(255,255,255,.15)",color:"white",padding:"3px 10px",borderRadius:99,fontSize:12,fontWeight:600}}>Citation: {r.citationReview?.declaredStyle}</span>
               <span style={{background:sc(r.aiDetection?.estimatedAiPercentage>50?30:70)+"30",color:r.aiDetection?.estimatedAiPercentage>50?"#fca5a5":"#86efac",padding:"3px 10px",borderRadius:99,fontSize:12,fontWeight:600}}>AI Usage: ~{r.aiDetection?.estimatedAiPercentage}%</span>
               <span style={{background:"rgba(255,255,255,.1)",color:"rgba(255,255,255,.8)",padding:"3px 10px",borderRadius:99,fontSize:12}}>Language: {r.languageReview?.overallLanguageScore}/100</span>
+              {submission.chunked&&<span style={{background:"rgba(255,255,255,.15)",color:"white",padding:"3px 10px",borderRadius:99,fontSize:12,fontWeight:600}}>Full document · {submission.chunksUsed} sections</span>}
             </div>
           </div>
           <div style={{display:"flex",gap:6,flexShrink:0}}>
@@ -1407,7 +1603,7 @@ function SupSubmitModal({db,student,onClose,showToast,actor}){
         extracted=await new Promise((res,rej)=>{const r=new FileReader();r.onload=e=>res(e.target.result||"");r.onerror=rej;r.readAsText(f);});
       }
       setText(extracted);
-      if(extracted.length>50000) setError("⚠ Large document ("+Math.round(extracted.length/1000)+"KB text). Only first ~14,000 characters will be analysed. Submit individual chapters for best results.");
+      if(extracted.length>139000) setError("⚠ Very large document ("+Math.round(extracted.length/1000)+"KB text). It will be analysed in sections, but only the first ~139,000 characters will be covered. Submit individual chapters for full coverage.");
       else if(extracted.length<100) setError("⚠ Could not extract text from this file. Try converting to .docx or .txt first.");
     }catch(e){setError("Could not read file: "+e.message);}
   };
@@ -1419,14 +1615,9 @@ function SupSubmitModal({db,student,onClose,showToast,actor}){
     try{
       const actorPrefix=actorRole==="admin"?`Admin: ${actorName||"Administrator"}. `:actorRole==="cosupervisor"?`Co-Supervisor: ${actorName||""}. `:actorName?`Supervisor: ${actorName}. `:"";
       const notes=actorPrefix+(student.extraPrompt||"");
-      const result=await analyzeDoc(text,student,notes,(cur,tot)=>setProgress(tot>1?`Analysing chunk ${cur} of ${tot}…`:"Analysing…"));
-      let extendedResult=null;
-      if(extended){
-        setProgress("Running extended review…");
-        extendedResult=await analyzeDocExtended(text,student,citStyle,notes,(cur,tot)=>setProgress(`Extended: chunk ${cur} of ${tot}…`));
-      }
+      const {result,extendedResult,chunked,chunksUsed,charsAnalysed,totalChars}=await analyzeSubmission(text,student,notes,{extended,citationStyle:citStyle,onProgress:setProgress});
       const submittedByLabel=actorRole==="admin"?(actorName?`admin (${actorName})`:"admin"):actorRole==="cosupervisor"?(actorName?`co-supervisor (${actorName})`:"co-supervisor"):"supervisor";
-      const sub={id:"sub_"+uid(),studentId:student.id,filename:file?.name||"Document",date:new Date().toISOString(),submittedBy:submittedByLabel,result,...(extendedResult?{extendedResult,citationStyle:citStyle}:{})};
+      const sub={id:"sub_"+uid(),studentId:student.id,filename:file?.name||"Document",date:new Date().toISOString(),submittedBy:submittedByLabel,result,chunked,chunksUsed,charsAnalysed,totalChars,...(extendedResult?{extendedResult,citationStyle:citStyle}:{})};
       db.setSubmissions(prev=>[...prev,sub]);
       showToast(extended?"Extended analysis complete!":"Analysis complete!");
       onClose();
@@ -1485,6 +1676,7 @@ function FeedbackModal({submission,students,onClose}){
             <div style={{display:"flex",gap:7,marginTop:7,flexWrap:"wrap"}}>
               <Pill label={`${r.overallScore}% · ${r.overallGrade}`} bg={sb(r.overallScore)} color={sc(r.overallScore)}/>
               <Pill label={r.supervisorDecision} bg={dc2(r.supervisorDecision)+"30"} color={dc2(r.supervisorDecision)}/>
+              {submission.chunked&&<Pill label={`Full document · ${submission.chunksUsed} sections`} bg="rgba(255,255,255,.15)" color="white"/>}
             </div>
           </div>
           <div style={{display:"flex",gap:6,flexShrink:0}}>
@@ -2112,7 +2304,7 @@ function StudentPortal({db,session,onLogout,showToast}){
         extracted=await new Promise((res,rej)=>{const r=new FileReader();r.onload=e=>res(e.target.result||"");r.onerror=rej;r.readAsText(f);});
       }
       setText(extracted);
-      if(extracted.length>50000) setError("⚠ Large document ("+Math.round(extracted.length/1000)+"KB text). Only first ~14,000 characters will be analysed. Submit individual chapters for best results.");
+      if(extracted.length>139000) setError("⚠ Very large document ("+Math.round(extracted.length/1000)+"KB text). It will be analysed in sections, but only the first ~139,000 characters will be covered. Submit individual chapters for full coverage.");
       else if(extracted.length<100) setError("⚠ Could not extract text from this file. Try converting to .docx or .txt first.");
     }catch(e){setError("Could not read file: "+e.message);}
   };
@@ -2122,13 +2314,8 @@ function StudentPortal({db,session,onLogout,showToast}){
     extended?setLoadingExt(true):setLoading(true);setError("");setProgress("");
     try{
       const notes=(sup?`Supervisor: ${sup.name}. `:"")+( stu.extraPrompt||"");
-      const result=await analyzeDoc(text,stu,notes,(cur,tot)=>setProgress(tot>1?`Analysing chunk ${cur} of ${tot}…`:"Analysing…"));
-      let extendedResult=null;
-      if(extended){
-        setProgress("Running extended review…");
-        extendedResult=await analyzeDocExtended(text,stu,citStyle,notes,(cur,tot)=>setProgress(`Extended review: chunk ${cur} of ${tot}…`));
-      }
-      const sub={id:"sub_"+uid(),studentId:stu.id,filename:file?.name||"Document",date:new Date().toISOString(),result,...(extendedResult?{extendedResult,citationStyle:citStyle}:{})};
+      const {result,extendedResult,chunked,chunksUsed,charsAnalysed,totalChars}=await analyzeSubmission(text,stu,notes,{extended,citationStyle:citStyle,onProgress:setProgress});
+      const sub={id:"sub_"+uid(),studentId:stu.id,filename:file?.name||"Document",date:new Date().toISOString(),result,chunked,chunksUsed,charsAnalysed,totalChars,...(extendedResult?{extendedResult,citationStyle:citStyle}:{})};
       db.setSubmissions(prev=>[...prev,sub]);
       extended?setViewExtSub(sub):setViewSub(sub);
       setFile(null);setText("");
