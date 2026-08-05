@@ -1,6 +1,7 @@
 import { useState, useRef, useCallback, useEffect } from "react";
 import React from "react";
 import mammoth from "mammoth";
+import { jsPDF } from "jspdf";
 import { initializeApp } from "firebase/app";
 import { getDatabase, ref, onValue, set, update, remove, get } from "firebase/database";
 
@@ -243,6 +244,7 @@ function Ic({n,size=18,c="currentColor"}){
     link2:`<path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>`,
     unlink:`<path d="M18.84 12.25l1.72-1.71a5.004 5.004 0 0 0-.12-7.07 5.006 5.006 0 0 0-6.95 0l-1.72 1.71"/><path d="M13.41 18.41l-1.72 1.71a5.004 5.004 0 0 1-7.07 0 4.996 4.996 0 0 1 0-7.07l1.71-1.71"/><line x1="8" y1="2" x2="8" y2="5"/><line x1="2" y1="8" x2="5" y2="8"/><line x1="16" y1="19" x2="16" y2="22"/><line x1="19" y1="16" x2="22" y2="16"/>`,
     bell:`<path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/>`,
+    download:`<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>`,
   };
   return React.createElement("svg",{width:size,height:size,viewBox:"0 0 24 24",fill:"none",stroke:c,strokeWidth:"2",strokeLinecap:"round",strokeLinejoin:"round",dangerouslySetInnerHTML:{__html:paths[n]||""}});
 }
@@ -677,6 +679,230 @@ async function extractPdfText(file) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
+// PDF REPORT GENERATION (jsPDF — client-side, no server round-trip)
+// ═══════════════════════════════════════════════════════════════════════
+
+const hexRgb = hex => {
+  const h = (hex || "#666666").replace("#", "");
+  const n = h.length === 3 ? h.split("").map(c => c + c).join("") : h;
+  const v = parseInt(n, 16);
+  return [(v >> 16) & 255, (v >> 8) & 255, v & 255];
+};
+
+function makePdfWriter(doc) {
+  const pageW = doc.internal.pageSize.getWidth();
+  const pageH = doc.internal.pageSize.getHeight();
+  const margin = 42;
+  const contentW = pageW - margin * 2;
+  let y = margin;
+
+  const newPage = () => { doc.addPage(); y = margin; };
+  const ensure = need => { if (y + need > pageH - 46) newPage(); };
+  const setColor = (hex, kind = "text") => {
+    const [r, g, b] = hexRgb(hex);
+    kind === "fill" ? doc.setFillColor(r, g, b) : kind === "draw" ? doc.setDrawColor(r, g, b) : doc.setTextColor(r, g, b);
+  };
+
+  const rule = (color = "#e2e8f0") => { ensure(10); setColor(color, "draw"); doc.setLineWidth(0.6); doc.line(margin, y, pageW - margin, y); y += 12; };
+
+  const h1 = txt => { ensure(26); doc.setFont("helvetica", "bold"); doc.setFontSize(16); setColor("#0f172a"); doc.text(txt, margin, y); y += 22; };
+  const h2 = txt => { ensure(20); doc.setFont("helvetica", "bold"); doc.setFontSize(12.5); setColor("#0f172a"); doc.text(txt, margin, y); y += 16; };
+  const h3 = (txt, color = "#374151") => { ensure(16); doc.setFont("helvetica", "bold"); doc.setFontSize(10.5); setColor(color); doc.text(txt, margin, y); y += 14; };
+
+  const para = (txt, opts = {}) => {
+    if (!txt) return;
+    const size = opts.size || 9.5;
+    doc.setFont("helvetica", opts.bold ? "bold" : "normal");
+    doc.setFontSize(size);
+    setColor(opts.color || "#334155");
+    const lines = doc.splitTextToSize(String(txt), opts.width || contentW);
+    const lh = opts.lineHeight || size * 1.35;
+    lines.forEach(line => { ensure(lh); doc.text(line, margin + (opts.indent || 0), y); y += lh; });
+    y += opts.gap ?? 4;
+  };
+
+  const bulletBlock = (title, items, { color = "#334155", bg = null, mark = "•", titleColor = "#374151" } = {}) => {
+    if (!items || !items.length) return;
+    h3(title, titleColor);
+    items.forEach(it => {
+      const size = 9.3;
+      doc.setFont("helvetica", "normal"); doc.setFontSize(size);
+      const lines = doc.splitTextToSize(`${mark} ${it}`, contentW - 10);
+      const boxH = lines.length * (size * 1.35) + 6;
+      ensure(boxH);
+      if (bg) { setColor(bg, "fill"); doc.roundedRect(margin, y - 2, contentW, boxH, 2, 2, "F"); }
+      setColor(color);
+      lines.forEach((line, i) => { doc.text(line, margin + 6, y + i * (size * 1.35) + 7); });
+      y += boxH + 3;
+    });
+    y += 4;
+  };
+
+  const scoreRow = (label, score, comment) => {
+    ensure(34);
+    const color = sc(score);
+    doc.setFont("helvetica", "bold"); doc.setFontSize(9.8); setColor("#374151");
+    doc.text(label, margin, y);
+    doc.setFont("helvetica", "bold"); doc.setFontSize(12); setColor(color);
+    doc.text(`${score}/100`, pageW - margin, y, { align: "right" });
+    y += 9;
+    setColor("#e2e8f0", "fill"); doc.roundedRect(margin, y, contentW, 4, 2, 2, "F");
+    setColor(color, "fill"); doc.roundedRect(margin, y, contentW * Math.max(0, Math.min(100, score)) / 100, 4, 2, 2, "F");
+    y += 12;
+    if (comment) para(comment, { size: 9, color: "#64748b", gap: 6 });
+    else y += 4;
+  };
+
+  const kvLine = (label, value) => {
+    ensure(13);
+    doc.setFont("helvetica", "bold"); doc.setFontSize(9); setColor("#64748b");
+    doc.text(label + ":", margin, y);
+    doc.setFont("helvetica", "normal"); setColor("#0f172a");
+    doc.text(String(value ?? "—"), margin + 100, y);
+    y += 13;
+  };
+
+  const spacer = n => { y += n; };
+
+  const footer = () => {
+    const pages = doc.internal.getNumberOfPages();
+    for (let i = 1; i <= pages; i++) {
+      doc.setPage(i);
+      setColor("#94a3b8"); doc.setFont("helvetica", "normal"); doc.setFontSize(8);
+      doc.text("AcademiQ Analyser — Generated report, for supervisory use", margin, pageH - 22);
+      doc.text(`Page ${i} of ${pages}`, pageW - margin, pageH - 22, { align: "right" });
+    }
+  };
+
+  return { doc, get y() { return y; }, set y(v) { y = v; }, contentW, margin, newPage, ensure, setColor, rule, h1, h2, h3, para, bulletBlock, scoreRow, kvLine, spacer, footer };
+}
+
+function writeStandardReport(w, submission, student) {
+  const r = submission.result;
+  if (!r) return;
+  w.h1("Assessment Report");
+  w.para(`${student.initials || ""} ${student.surname || ""}  ·  ${student.number || ""}  ·  ${student.level || ""}`, { size: 10, bold: true, color: "#0f172a", gap: 2 });
+  w.para(`${submission.filename || "Document"}  ·  Submitted ${new Date(submission.date).toLocaleDateString("en-ZA")}${submission.submittedBy ? "  ·  Submitted by " + submission.submittedBy : ""}`, { size: 9, color: "#64748b", gap: 8 });
+  w.rule();
+
+  w.h2("Overall Result");
+  w.kvLine("Score", `${r.overallScore}% (${r.overallGrade})`);
+  w.kvLine("Decision", r.supervisorDecision || "—");
+  w.spacer(4);
+  if (r.overallVerdict) w.para(r.overallVerdict, { size: 9.5, color: "#0c4a6e", gap: 10 });
+
+  if (r.positives?.length) w.bulletBlock("Strengths", r.positives, { color: "#14532d", bg: "#f0fdf4", mark: "✓", titleColor: "#16a34a" });
+  if (r.criticalIssues?.length) w.bulletBlock("Critical Issues", r.criticalIssues, { color: "#7f1d1d", bg: "#fee2e2", mark: "✗", titleColor: "#dc2626" });
+
+  if (r.sections?.length) {
+    w.rule();
+    w.h2("Section-by-Section Breakdown");
+    r.sections.forEach(s => {
+      w.ensure(24);
+      w.scoreRow(`${s.name}  (Grade: ${s.grade || "—"})`, s.score, null);
+      if (s.strengths?.length) w.bulletBlock("Strengths", s.strengths, { color: "#166534", mark: "+", titleColor: "#16a34a" });
+      if (s.weaknesses?.length) w.bulletBlock("Weaknesses", s.weaknesses, { color: "#7f1d1d", mark: "–", titleColor: "#dc2626" });
+      if (s.supervisorInstruction) w.para("Instruction: " + s.supervisorInstruction, { size: 9, color: "#78350f", bg: "#fffbeb", gap: 10 });
+      w.spacer(4);
+    });
+  }
+
+  if (r.priorityActions?.length) {
+    w.rule();
+    w.h2("Priority Actions");
+    r.priorityActions.forEach(a => w.para(`[${a.priority}] ${a.action}`, { size: 9.3, color: pc(a.priority), gap: 5 }));
+  }
+
+  if (r.disciplinaryAssessment || r.ecsa_ga_notes) {
+    w.rule();
+    w.h2("Disciplinary & ECSA Graduate Attributes");
+    if (r.disciplinaryAssessment) { w.h3("Disciplinary Assessment"); w.para(r.disciplinaryAssessment, { size: 9.3, gap: 10 }); }
+    if (r.ecsa_ga_notes) { w.h3("ECSA Graduate Attributes"); w.para(r.ecsa_ga_notes, { size: 9.3, gap: 4 }); }
+  }
+}
+
+function writeExtendedReport(w, submission, student) {
+  const x = submission.extendedResult;
+  if (!x) return;
+  w.newPage();
+  w.h1("Extended Editorial Review");
+  w.para(`${student.initials || ""} ${student.surname || ""}  ·  Citation style: ${x.citationReview?.declaredStyle || "—"}`, { size: 9.5, color: "#64748b", gap: 8 });
+  w.rule();
+
+  if (x.languageReview) {
+    w.h2("Language & Grammar");
+    w.scoreRow("Overall Language Score", x.languageReview.overallLanguageScore, null);
+    w.scoreRow("Readability", x.languageReview.readabilityScore, x.languageReview.readabilityComment);
+    if (x.languageReview.spellingErrors?.length) w.bulletBlock("Spelling Errors", x.languageReview.spellingErrors.map(e => `${e.original} → ${e.correction}${e.context ? "  (\"" + e.context + "\")" : ""}`), { color: "#7f1d1d", bg: "#fee2e2", titleColor: "#dc2626" });
+    if (x.languageReview.grammarErrors?.length) w.bulletBlock("Grammar Issues", x.languageReview.grammarErrors.map(e => `${e.issue}${e.location ? "  (\"" + e.location + "\")" : ""}${e.suggestion ? "  → " + e.suggestion : ""}`), { color: "#78350f", bg: "#fffbeb", titleColor: "#d97706" });
+    if (x.languageReview.styleIssues?.length) w.bulletBlock("Style Issues", x.languageReview.styleIssues.map(e => `${e.type}${e.location ? "  (\"" + e.location + "\")" : ""}${e.suggestion ? "  → " + e.suggestion : ""}`), { color: "#1e3a8a", bg: "#eff6ff", titleColor: "#2563b0" });
+    w.rule();
+  }
+
+  if (x.literatureReview) {
+    w.h2("Literature Review");
+    w.scoreRow("Funnel Approach", x.literatureReview.funnelApproachScore, x.literatureReview.funnelApproachComment);
+    w.scoreRow("Relevance", x.literatureReview.relevanceScore, x.literatureReview.relevanceComment);
+    w.scoreRow("Critical Analysis", x.literatureReview.criticalAnalysisScore, x.literatureReview.criticalAnalysisComment);
+    w.scoreRow("Flow", x.literatureReview.flowScore, x.literatureReview.flowComment);
+    if (x.literatureReview.gaps?.length) w.bulletBlock("Gaps Identified", x.literatureReview.gaps, { color: "#7f1d1d", mark: "✗", titleColor: "#dc2626" });
+    if (x.literatureReview.strengths?.length) w.bulletBlock("Strengths", x.literatureReview.strengths, { color: "#14532d", mark: "✓", titleColor: "#16a34a" });
+    w.rule();
+  }
+
+  if (x.citationReview) {
+    w.h2("Citations & References");
+    w.kvLine("Citation Score", `${x.citationReview.overallCitationScore}%`);
+    w.kvLine("Missing References", x.citationReview.missingReferences?.length || 0);
+    w.kvLine("Orphaned References", x.citationReview.orphanedReferences?.length || 0);
+    w.spacer(4);
+    if (x.citationReview.citationIssuesSummary) w.para(x.citationReview.citationIssuesSummary, { size: 9.3, color: "#0c4a6e", gap: 8 });
+    if (x.citationReview.inTextCitations?.length) w.bulletBlock("In-Text Citations", x.citationReview.inTextCitations.map(c => `${c.citation}${c.isCorrect ? " ✓" : "  ⚠ " + (c.issue || "") + (c.correction ? "  → " + c.correction : "")}`), { color: "#334155", titleColor: "#374151" });
+    if (x.citationReview.referenceList?.length) w.bulletBlock("Reference List", x.citationReview.referenceList.map(rf => `${rf.fullReference}${rf.isCorrect ? "" : "  ⚠ " + (rf.issue || "") + (rf.correction ? "  → " + rf.correction : "")}`), { color: "#334155", titleColor: "#374151" });
+    if (x.citationReview.missingReferences?.length) w.bulletBlock("Cited but not in Reference List", x.citationReview.missingReferences, { color: "#7f1d1d", mark: "✗", titleColor: "#dc2626" });
+    if (x.citationReview.orphanedReferences?.length) w.bulletBlock("In Reference List but not Cited", x.citationReview.orphanedReferences, { color: "#78350f", mark: "⚠", titleColor: "#d97706" });
+    w.rule();
+  }
+
+  if (x.aiDetection) {
+    w.h2("AI Detection");
+    w.kvLine("Estimated AI Content", `${x.aiDetection.estimatedAiPercentage}%`);
+    w.kvLine("Confidence", x.aiDetection.confidence || "—");
+    w.spacer(4);
+    if (x.aiDetection.aiComment) w.para(x.aiDetection.aiComment, { size: 9.3, gap: 8 });
+    if (x.aiDetection.aiSections?.length) w.bulletBlock("Suspected AI-Generated Sections", x.aiDetection.aiSections.map(s => `${s.section} — ${s.likelihood} likelihood${s.excerpt ? "  (\"" + s.excerpt + "…\")" : ""}`), { color: "#7f1d1d", bg: "#fee2e2", titleColor: "#dc2626" });
+    if (x.aiDetection.humanSections?.length) w.bulletBlock("Human-Written Sections", x.aiDetection.humanSections, { color: "#14532d", mark: "✓", titleColor: "#16a34a" });
+    w.rule();
+  }
+
+  if (x.informationFlow) {
+    w.h2("Information Flow");
+    w.scoreRow("Overall Flow", x.informationFlow.overallFlowScore, x.informationFlow.logicalProgressionComment);
+    w.kvLine("Transition Quality", x.informationFlow.transitionQuality || "—");
+    w.spacer(4);
+    if (x.informationFlow.sectionFlow?.length) w.bulletBlock("Section-by-Section Flow", x.informationFlow.sectionFlow.map(s => `${s.section} — ${s.flowScore}/100: ${s.comment}${s.issue ? "  ⚠ " + s.issue : ""}`), { color: "#334155", titleColor: "#374151" });
+    if (x.informationFlow.recommendations?.length) w.bulletBlock("Recommendations", x.informationFlow.recommendations, { color: "#1e40af", mark: "→", titleColor: "#374151" });
+    w.rule();
+  }
+
+  if (x.editorialSummary || x.priorityCorrections?.length) {
+    w.h2("Summary");
+    if (x.editorialSummary) w.para(x.editorialSummary, { size: 9.5, color: "#0c4a6e", gap: 10 });
+    if (x.priorityCorrections?.length) w.bulletBlock("Priority Corrections", x.priorityCorrections.map(c => `[${c.priority}/${c.type}] ${c.action}`), { color: "#334155", titleColor: "#374151" });
+  }
+}
+
+function generateReportPDF(submission, student) {
+  const doc = new jsPDF({ unit: "pt", format: "a4" });
+  const w = makePdfWriter(doc);
+  writeStandardReport(w, submission, student || {});
+  if (submission.extendedResult) writeExtendedReport(w, submission, student || {});
+  w.footer();
+  const safeName = `${(student?.surname || "student").replace(/[^a-z0-9]/gi, "_")}_${(submission.filename || "report").replace(/\.[^/.]+$/, "").replace(/[^a-z0-9]/gi, "_")}`;
+  doc.save(`${safeName}_AcademiQ_Report.pdf`);
+}
+
+// ═══════════════════════════════════════════════════════════════════════
 // CITATION STYLES
 // ═══════════════════════════════════════════════════════════════════════
 
@@ -843,7 +1069,10 @@ function ExtendedFeedbackModal({submission,students,onClose}){
               <span style={{background:"rgba(255,255,255,.1)",color:"rgba(255,255,255,.8)",padding:"3px 10px",borderRadius:99,fontSize:12}}>Language: {r.languageReview?.overallLanguageScore}/100</span>
             </div>
           </div>
-          <button onClick={onClose} style={{background:"rgba(255,255,255,.1)",border:"none",borderRadius:7,width:28,height:28,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center"}}><Ic n="x" size={14} c="white"/></button>
+          <div style={{display:"flex",gap:6,flexShrink:0}}>
+            <button onClick={()=>generateReportPDF(submission,st)} title="Download PDF" style={{background:"rgba(255,255,255,.1)",border:"none",borderRadius:7,padding:"0 10px",height:28,cursor:"pointer",display:"flex",alignItems:"center",gap:5,color:"white",fontSize:11,fontWeight:600}}><Ic n="download" size={13} c="white"/> PDF</button>
+            <button onClick={onClose} style={{background:"rgba(255,255,255,.1)",border:"none",borderRadius:7,width:28,height:28,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center"}}><Ic n="x" size={14} c="white"/></button>
+          </div>
         </div>
 
         {/* Tabs */}
@@ -1149,7 +1378,7 @@ function ExtendedFeedbackModal({submission,students,onClose}){
 // SUPERVISOR SUBMIT ON BEHALF OF STUDENT
 // ═══════════════════════════════════════════════════════════════════════
 
-function SupSubmitModal({db,student,onClose,showToast}){
+function SupSubmitModal({db,student,onClose,showToast,actor}){
   const fileRef=useRef();
   const[file,setFile]=useState(null);
   const[text,setText]=useState("");
@@ -1158,6 +1387,10 @@ function SupSubmitModal({db,student,onClose,showToast}){
   const[loadingExt,setLoadingExt]=useState(false);
   const[error,setError]=useState("");
   const sup=db.supervisors.find(s=>s.id===student.supervisorId);
+  // actor: who is performing this upload — defaults to the student's primary supervisor.
+  // Pass {role:"admin",name} for admin uploads, or {role:"cosupervisor",name} for co-supervisor uploads.
+  const actorRole=actor?.role||"supervisor";
+  const actorName=actor?.name||sup?.name;
 
   const handleFile=async f=>{
     if(!f)return;setFile(f);setError("");setText("");
@@ -1184,14 +1417,16 @@ function SupSubmitModal({db,student,onClose,showToast}){
     if(!text.trim())return setError("Upload a document first.");
     extended?setLoadingExt(true):setLoading(true);setError("");setProgress("");
     try{
-      const notes=(sup?`Supervisor: ${sup.name}. `:"")+( student.extraPrompt||"");
+      const actorPrefix=actorRole==="admin"?`Admin: ${actorName||"Administrator"}. `:actorRole==="cosupervisor"?`Co-Supervisor: ${actorName||""}. `:actorName?`Supervisor: ${actorName}. `:"";
+      const notes=actorPrefix+(student.extraPrompt||"");
       const result=await analyzeDoc(text,student,notes,(cur,tot)=>setProgress(tot>1?`Analysing chunk ${cur} of ${tot}…`:"Analysing…"));
       let extendedResult=null;
       if(extended){
         setProgress("Running extended review…");
         extendedResult=await analyzeDocExtended(text,student,citStyle,notes,(cur,tot)=>setProgress(`Extended: chunk ${cur} of ${tot}…`));
       }
-      const sub={id:"sub_"+uid(),studentId:student.id,filename:file?.name||"Document",date:new Date().toISOString(),submittedBy:"supervisor",result,...(extendedResult?{extendedResult,citationStyle:citStyle}:{})};
+      const submittedByLabel=actorRole==="admin"?(actorName?`admin (${actorName})`:"admin"):actorRole==="cosupervisor"?(actorName?`co-supervisor (${actorName})`:"co-supervisor"):"supervisor";
+      const sub={id:"sub_"+uid(),studentId:student.id,filename:file?.name||"Document",date:new Date().toISOString(),submittedBy:submittedByLabel,result,...(extendedResult?{extendedResult,citationStyle:citStyle}:{})};
       db.setSubmissions(prev=>[...prev,sub]);
       showToast(extended?"Extended analysis complete!":"Analysis complete!");
       onClose();
@@ -1252,7 +1487,10 @@ function FeedbackModal({submission,students,onClose}){
               <Pill label={r.supervisorDecision} bg={dc2(r.supervisorDecision)+"30"} color={dc2(r.supervisorDecision)}/>
             </div>
           </div>
-          <button onClick={onClose} style={{background:"rgba(255,255,255,.1)",border:"none",borderRadius:7,width:28,height:28,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center"}}><Ic n="x" size={14} c="white"/></button>
+          <div style={{display:"flex",gap:6,flexShrink:0}}>
+            <button onClick={()=>generateReportPDF(submission,st)} title="Download PDF" style={{background:"rgba(255,255,255,.1)",border:"none",borderRadius:7,padding:"0 10px",height:28,cursor:"pointer",display:"flex",alignItems:"center",gap:5,color:"white",fontSize:11,fontWeight:600}}><Ic n="download" size={13} c="white"/> PDF</button>
+            <button onClick={onClose} style={{background:"rgba(255,255,255,.1)",border:"none",borderRadius:7,width:28,height:28,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center"}}><Ic n="x" size={14} c="white"/></button>
+          </div>
         </div>
         <div style={{padding:"0 1.4rem",background:"#f8fafc",borderBottom:"1px solid #e2e8f0",display:"flex"}}>
           {tabs.map(t=><button key={t.id} onClick={()=>setTab(t.id)} style={{padding:"10px 14px",border:"none",background:"none",cursor:"pointer",fontWeight:tab===t.id?700:400,color:tab===t.id?"#0f172a":"#94a3b8",borderBottom:`2px solid ${tab===t.id?"#3b82f6":"transparent"}`,fontSize:13,whiteSpace:"nowrap"}}>{t.label}</button>)}
@@ -1322,7 +1560,10 @@ function RecentReports({db,submissions,students}){
     {label:"Score",    render:r=><span style={{fontWeight:800,color:sc(r.result?.overallScore||0)}}>{r.result?.overallScore??"-"}%</span>},
     {label:"Decision", render:r=>r.result?.supervisorDecision?<Pill label={r.result.supervisorDecision} bg={sb(r.result.overallScore||0)} color={dc2(r.result.supervisorDecision)}/>:"-"},
     {label:"Date",     render:r=><span style={{color:"#94a3b8",fontSize:12}}>{new Date(r.date).toLocaleDateString("en-ZA")}</span>},
-    {label:"",         render:r=><button onClick={()=>setView(r)} style={{background:"none",border:"none",cursor:"pointer",color:"#3b82f6"}}><Ic n="eye" size={14}/></button>},
+    {label:"",         render:r=><div style={{display:"flex",gap:6}}>
+      <button onClick={()=>setView(r)} style={{background:"none",border:"none",cursor:"pointer",color:"#3b82f6"}}><Ic n="eye" size={14}/></button>
+      <button onClick={()=>generateReportPDF(r,getStu(r.studentId))} title="Download PDF" style={{background:"none",border:"none",cursor:"pointer",color:"#64748b"}}><Ic n="download" size={14}/></button>
+    </div>},
   ];
   return(
     <>
@@ -1357,7 +1598,7 @@ function AdminPortal({db,session,onLogout,showToast}){
       {view==="dashboard"   && <AdminDashboard   db={db}/>}
       {view==="admins"      && <AdminsTab        db={db} session={session} showToast={showToast}/>}
       {view==="supervisors" && <SupervisorsTab   db={db} showToast={showToast}/>}
-      {view==="students"    && <AdminStudentsTab db={db} showToast={showToast}/>}
+      {view==="students"    && <AdminStudentsTab db={db} session={session} showToast={showToast}/>}
       {view==="reports"     && <AllReportsTab    db={db}/>}
       {view==="allocate"    && <AllocateTab      db={db} showToast={showToast}/>}
       {view==="settings"    && <AccountSettings  role="admin" db={db} session={session} showToast={showToast}/>}
@@ -1486,10 +1727,11 @@ function SupFormModal({db,existing,onClose,showToast}){
   );
 }
 
-function AdminStudentsTab({db,showToast}){
-  const[showAdd,setShowAdd]=useState(false);const[edit,setEdit]=useState(null);const[search,setSearch]=useState("");
+function AdminStudentsTab({db,session,showToast}){
+  const[showAdd,setShowAdd]=useState(false);const[edit,setEdit]=useState(null);const[search,setSearch]=useState("");const[submitFor,setSubmitFor]=useState(null);
   const rows=db.students.filter(s=>`${s.surname} ${s.initials} ${s.number}`.toLowerCase().includes(search.toLowerCase()));
   const getSup=id=>db.supervisors.find(s=>s.id===id);
+  const me=db.admins.find(a=>a.id===session?.id);
   const del=s=>{ if(!window.confirm(`Delete ${s.initials} ${s.surname}?`))return; db.setStudents(prev=>prev.filter(x=>x.id!==s.id)); showToast("Student deleted."); };
   const cols=[
     {label:"Student",   render:r=><span style={{fontWeight:700}}>{r.initials} {r.surname}</span>},
@@ -1501,6 +1743,7 @@ function AdminStudentsTab({db,showToast}){
     {label:"Reports",   render:r=>db.submissions.filter(s=>s.studentId===r.id).length},
     {label:"",          render:r=><div style={{display:"flex",gap:5}}>
       <button onClick={()=>setEdit(r)} style={{background:"#eff6ff",border:"none",borderRadius:6,padding:"4px 7px",cursor:"pointer",color:"#3b82f6"}}><Ic n="edit" size={13}/></button>
+      <button onClick={()=>setSubmitFor(r)} title="Submit on behalf of student" style={{background:"#f0fdf4",border:"none",borderRadius:6,padding:"4px 7px",cursor:"pointer",color:"#16a34a"}}><Ic n="upload" size={13}/></button>
       <button onClick={()=>del(r)} style={{background:"#fee2e2",border:"none",borderRadius:6,padding:"4px 7px",cursor:"pointer",color:"#dc2626"}}><Ic n="trash" size={13}/></button>
     </div>},
   ];
@@ -1511,7 +1754,8 @@ function AdminStudentsTab({db,showToast}){
       <DataTable cols={cols} rows={rows}/>
     </Pad>
     {showAdd&&<StudentFormModal db={db} onClose={()=>setShowAdd(false)} showToast={showToast}/>}
-    {edit&&<StudentFormModal db={db} existing={edit} onClose={()=>setEdit(null)} showToast={showToast}/>}</>
+    {edit&&<StudentFormModal db={db} existing={edit} onClose={()=>setEdit(null)} showToast={showToast}/>}
+    {submitFor&&<SupSubmitModal db={db} student={submitFor} onClose={()=>setSubmitFor(null)} showToast={showToast} actor={{role:"admin",name:me?.name||me?.username}}/>}</>
   );
 }
 
@@ -1528,7 +1772,7 @@ function AllReportsTab({db}){
     {label:"Score",     render:r=><span style={{fontWeight:800,color:sc(r.result?.overallScore||0)}}>{r.result?.overallScore??"-"}%</span>},
     {label:"Decision",  render:r=>r.result?.supervisorDecision?<Pill label={r.result.supervisorDecision} bg={sb(r.result.overallScore||0)} color={dc2(r.result.supervisorDecision)}/>:"-"},
     {label:"Date",      render:r=><span style={{color:"#94a3b8",fontSize:12}}>{new Date(r.date).toLocaleDateString("en-ZA")}</span>},
-    {label:"",          render:r=><div style={{display:"flex",gap:5}}><button onClick={()=>setView(r)} style={{background:"none",border:"none",cursor:"pointer",color:"#3b82f6"}}><Ic n="eye" size={14}/></button>{r.extendedResult&&<button onClick={()=>setViewExt(r)} style={{background:"#ede9fe",border:"none",borderRadius:6,padding:"3px 7px",cursor:"pointer",color:"#4f46e5",fontSize:11,fontWeight:600}}>Ext</button>}</div>},
+    {label:"",          render:r=><div style={{display:"flex",gap:5}}><button onClick={()=>setView(r)} style={{background:"none",border:"none",cursor:"pointer",color:"#3b82f6"}}><Ic n="eye" size={14}/></button>{r.extendedResult&&<button onClick={()=>setViewExt(r)} style={{background:"#ede9fe",border:"none",borderRadius:6,padding:"3px 7px",cursor:"pointer",color:"#4f46e5",fontSize:11,fontWeight:600}}>Ext</button>}<button onClick={()=>generateReportPDF(r,getStu(r.studentId))} title="Download PDF" style={{background:"none",border:"none",cursor:"pointer",color:"#64748b"}}><Ic n="download" size={14}/></button></div>},
   ];
   const[viewExt,setViewExt]=useState(null);
   return(
@@ -1789,11 +2033,12 @@ function SupStudents({db,session,myStudents,coStudents,pending,showToast}){
             {label:"Level",   render:r=><Pill label={r.level} bg="#ede9fe" color="#5b21b6"/>},
             {label:"Primary Supervisor", render:r=>{const s=db.supervisors.find(x=>x.id===r.supervisorId);return s?<span style={{fontSize:12}}>{s.name}</span>:<span style={{color:"#94a3b8",fontSize:12}}>None</span>;}},
             {label:"Reports", render:r=>db.submissions.filter(s=>s.studentId===r.id).length},
+            {label:"",        render:r=><button onClick={()=>setSubmitFor(r)} title="Submit on behalf of student" style={{background:"#f0fdf4",border:"none",borderRadius:6,padding:"4px 7px",cursor:"pointer",color:"#16a34a"}}><Ic n="upload" size={13}/></button>},
           ]} rows={coStudents} empty="No co-supervised students."/>
         </Pad>
       )}
       {edit&&<StudentFormModal db={db} existing={edit} onClose={()=>setEdit(null)} showToast={showToast}/>}
-      {submitFor&&<SupSubmitModal db={db} student={submitFor} onClose={()=>setSubmitFor(null)} showToast={showToast}/>}
+      {submitFor&&<SupSubmitModal db={db} student={submitFor} onClose={()=>setSubmitFor(null)} showToast={showToast} actor={myStudents.some(s=>s.id===submitFor.id)?undefined:{role:"cosupervisor",name:db.supervisors.find(s=>s.id===session.id)?.name}}/>}
       {showPending&&(
         <Modal title={`Student Requests (${pending.length})`} onClose={()=>setShowPending(false)}>
           {pending.length===0?<p style={{color:"#94a3b8",fontSize:13}}>No pending requests.</p>:pending.map(s=>(
@@ -1821,7 +2066,7 @@ function SupReports({db,myStudents,mySubs}){
     {label:"Score",   render:r=><span style={{fontWeight:800,color:sc(r.result?.overallScore||0)}}>{r.result?.overallScore??"-"}%</span>},
     {label:"Decision",render:r=>r.result?.supervisorDecision?<Pill label={r.result.supervisorDecision} bg={sb(r.result.overallScore||0)} color={dc2(r.result.supervisorDecision)}/>:"-"},
     {label:"Date",    render:r=><span style={{color:"#94a3b8",fontSize:12}}>{new Date(r.date).toLocaleDateString("en-ZA")}</span>},
-    {label:"",        render:r=><div style={{display:"flex",gap:5}}><button onClick={()=>setView(r)} style={{background:"none",border:"none",cursor:"pointer",color:"#3b82f6"}}><Ic n="eye" size={14}/></button>{r.extendedResult&&<button onClick={()=>setViewExt(r)} style={{background:"#ede9fe",border:"none",borderRadius:6,padding:"3px 7px",cursor:"pointer",color:"#4f46e5",fontSize:11,fontWeight:600}}>Ext</button>}</div>},
+    {label:"",        render:r=><div style={{display:"flex",gap:5}}><button onClick={()=>setView(r)} style={{background:"none",border:"none",cursor:"pointer",color:"#3b82f6"}}><Ic n="eye" size={14}/></button>{r.extendedResult&&<button onClick={()=>setViewExt(r)} style={{background:"#ede9fe",border:"none",borderRadius:6,padding:"3px 7px",cursor:"pointer",color:"#4f46e5",fontSize:11,fontWeight:600}}>Ext</button>}<button onClick={()=>generateReportPDF(r,getStu(r.studentId))} title="Download PDF" style={{background:"none",border:"none",cursor:"pointer",color:"#64748b"}}><Ic n="download" size={14}/></button></div>},
   ];
   return(
     <><PageHeader title="Student Reports"/>
