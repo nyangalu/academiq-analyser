@@ -143,10 +143,35 @@ async function callClaudeAPI(prompt, system, maxTokens = 4000) {
   return (d.text || "").replace(/```json|```/g, "").trim();
 }
 
+// Structurally repairs truncated/malformed JSON by tracking open braces/brackets/strings
+// and appending exactly what's needed to close them, in the correct order.
+function autoCloseJson(raw) {
+  let s = raw.trim();
+  const firstBrace = s.indexOf("{");
+  if (firstBrace > 0) s = s.slice(firstBrace); // strip any preamble prose before the JSON starts
+  let inString = false, escape = false;
+  const stack = [];
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    if (escape) { escape = false; continue; }
+    if (ch === "\\" && inString) { escape = true; continue; }
+    if (ch === '"') { inString = !inString; continue; }
+    if (inString) continue;
+    if (ch === "{" || ch === "[") stack.push(ch);
+    else if (ch === "}" || ch === "]") stack.pop();
+  }
+  let repaired = s;
+  if (inString) repaired += '"';
+  repaired = repaired.replace(/,\s*$/, "");
+  while (stack.length) repaired += stack.pop() === "{" ? "}" : "]";
+  return repaired;
+}
+
 function parseJsonLoose(raw, failMessage) {
   try { return JSON.parse(raw); } catch (e) {
+    try { return JSON.parse(autoCloseJson(raw)); } catch (e2) {}
     const repairs = [raw + '"]}', raw + '"}]}', raw + '"]}]}', raw.replace(/,\s*$/, "") + "}}}", raw.replace(/,\s*$/, "") + "}}}}", raw.replace(/,\s*$/, "") + "}}}}}", raw.replace(/,\s*$/, "") + "}}}}}}"];
-    for (const a of repairs) { try { return JSON.parse(a); } catch (e2) {} }
+    for (const a of repairs) { try { return JSON.parse(a); } catch (e3) {} }
     throw new Error(failMessage || "Could not parse the AI response as JSON.");
   }
 }
@@ -279,10 +304,15 @@ FRAGMENT TEXT:
 ${chunk}
 ---
 
-Return ONLY valid JSON summarising this fragment:
-{"likelySection":"<Introduction|Literature Review|Methodology|Results|Discussion|Conclusion|References|Appendix|Mixed/Unclear>","summary":"<4-6 sentence factual summary of what this fragment covers>","strengths":["<specific strength observed in this fragment, with a short quoted/paraphrased example if useful>"],"weaknesses":["<specific weakness or issue observed in this fragment>"],"notableCitations":["<citation exactly as it appears, or omit if none>"],"languageNotes":["<spelling/grammar/style issue observed, with the exact snippet, or omit if none>"]}`;
-  const raw = await callClaudeAPI(prompt, "You are a meticulous academic reviewer producing structured notes on one fragment of a larger document. Return only JSON.", 1500);
-  return parseJsonLoose(raw, `Could not process section ${index + 1} of ${total}.`);
+Return ONLY valid JSON summarising this fragment. Keep it concise — at most 5 items in each list (pick the most significant), and keep each list item to one short sentence, so the whole response stays compact:
+{"likelySection":"<Introduction|Literature Review|Methodology|Results|Discussion|Conclusion|References|Appendix|Mixed/Unclear>","summary":"<3-4 sentence factual summary of what this fragment covers>","strengths":["<specific strength, one short sentence, max 5 items>"],"weaknesses":["<specific weakness/issue, one short sentence, max 5 items>"],"notableCitations":["<citation exactly as it appears, max 5 items, omit if none>"],"languageNotes":["<spelling/grammar/style issue with a short snippet, max 5 items, omit if none>"]}`;
+  const raw = await callClaudeAPI(prompt, "You are a meticulous academic reviewer producing structured notes on one fragment of a larger document. Return only JSON. Be concise.", 2200);
+  try {
+    return parseJsonLoose(raw, `Could not process section ${index + 1} of ${total}.`);
+  } catch (e) {
+    // Degrade gracefully — one unparsable fragment shouldn't abort the whole submission.
+    return { likelySection: "Unclear", summary: `[Section ${index + 1} of ${total} could not be automatically summarised — its content was not captured in this report.]`, strengths: [], weaknesses: [], notableCitations: [], languageNotes: [], _failed: true };
+  }
 }
 
 const digestChunks = summaries => summaries.map((c, i) =>
@@ -445,7 +475,8 @@ async function analyzeSubmission(text, student, supNotes, opts = {}) {
     extendedResult = await reduceExtendedFromChunks(chunkSummaries, student, citationStyle, supNotes);
   }
   const charsAnalysed = CHUNK_SIZE + (chunks.length - 1) * (CHUNK_SIZE - CHUNK_OVERLAP);
-  return { result, extendedResult, chunked: true, chunksUsed: chunks.length, charsAnalysed: Math.min(charsAnalysed, text.length), totalChars: text.length };
+  const chunksFailed = chunkSummaries.filter(c => c._failed).length;
+  return { result, extendedResult, chunked: true, chunksUsed: chunks.length, chunksFailed, charsAnalysed: Math.min(charsAnalysed, text.length), totalChars: text.length };
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -1092,7 +1123,7 @@ function writeStandardReport(w, submission, student) {
   if (!r) return;
   w.h1("Assessment Report");
   w.para(`${student.initials || ""} ${student.surname || ""}  ·  ${student.number || ""}  ·  ${student.level || ""}`, { size: 10, bold: true, color: "#0f172a", gap: 2 });
-  w.para(`${submission.filename || "Document"}  ·  Submitted ${new Date(submission.date).toLocaleDateString("en-ZA")}${submission.submittedBy ? "  ·  Submitted by " + submission.submittedBy : ""}${submission.chunked ? "  ·  Full document analysed in " + submission.chunksUsed + " sections" : ""}`, { size: 9, color: "#64748b", gap: 8 });
+  w.para(`${submission.filename || "Document"}  ·  Submitted ${new Date(submission.date).toLocaleDateString("en-ZA")}${submission.submittedBy ? "  ·  Submitted by " + submission.submittedBy : ""}${submission.chunked ? "  ·  Full document analysed in " + submission.chunksUsed + " sections" : ""}${submission.chunksFailed ? "  ·  ⚠ " + submission.chunksFailed + " section(s) could not be read" : ""}`, { size: 9, color: "#64748b", gap: 8 });
   w.rule();
 
   w.h2("Overall Result");
@@ -1263,6 +1294,7 @@ function ExtendedFeedbackModal({submission,students,onClose}){
               <span style={{background:sc(r.aiDetection?.estimatedAiPercentage>50?30:70)+"30",color:r.aiDetection?.estimatedAiPercentage>50?"#fca5a5":"#86efac",padding:"3px 10px",borderRadius:99,fontSize:12,fontWeight:600}}>AI Usage: ~{r.aiDetection?.estimatedAiPercentage}%</span>
               <span style={{background:"rgba(255,255,255,.1)",color:"rgba(255,255,255,.8)",padding:"3px 10px",borderRadius:99,fontSize:12}}>Language: {r.languageReview?.overallLanguageScore}/100</span>
               {submission.chunked&&<span style={{background:"rgba(255,255,255,.15)",color:"white",padding:"3px 10px",borderRadius:99,fontSize:12,fontWeight:600}}>Full document · {submission.chunksUsed} sections</span>}
+              {submission.chunksFailed>0&&<span style={{background:"#dc2626",color:"white",padding:"3px 10px",borderRadius:99,fontSize:12,fontWeight:600}}>⚠ {submission.chunksFailed} section{submission.chunksFailed>1?"s":""} unreadable</span>}
             </div>
           </div>
           <div style={{display:"flex",gap:6,flexShrink:0}}>
@@ -1615,9 +1647,9 @@ function SupSubmitModal({db,student,onClose,showToast,actor}){
     try{
       const actorPrefix=actorRole==="admin"?`Admin: ${actorName||"Administrator"}. `:actorRole==="cosupervisor"?`Co-Supervisor: ${actorName||""}. `:actorName?`Supervisor: ${actorName}. `:"";
       const notes=actorPrefix+(student.extraPrompt||"");
-      const {result,extendedResult,chunked,chunksUsed,charsAnalysed,totalChars}=await analyzeSubmission(text,student,notes,{extended,citationStyle:citStyle,onProgress:setProgress});
+      const {result,extendedResult,chunked,chunksUsed,chunksFailed,charsAnalysed,totalChars}=await analyzeSubmission(text,student,notes,{extended,citationStyle:citStyle,onProgress:setProgress});
       const submittedByLabel=actorRole==="admin"?(actorName?`admin (${actorName})`:"admin"):actorRole==="cosupervisor"?(actorName?`co-supervisor (${actorName})`:"co-supervisor"):"supervisor";
-      const sub={id:"sub_"+uid(),studentId:student.id,filename:file?.name||"Document",date:new Date().toISOString(),submittedBy:submittedByLabel,result,chunked,chunksUsed,charsAnalysed,totalChars,...(extendedResult?{extendedResult,citationStyle:citStyle}:{})};
+      const sub={id:"sub_"+uid(),studentId:student.id,filename:file?.name||"Document",date:new Date().toISOString(),submittedBy:submittedByLabel,result,chunked,chunksUsed,chunksFailed,charsAnalysed,totalChars,...(extendedResult?{extendedResult,citationStyle:citStyle}:{})};
       db.setSubmissions(prev=>[...prev,sub]);
       showToast(extended?"Extended analysis complete!":"Analysis complete!");
       onClose();
@@ -1677,6 +1709,7 @@ function FeedbackModal({submission,students,onClose}){
               <Pill label={`${r.overallScore}% · ${r.overallGrade}`} bg={sb(r.overallScore)} color={sc(r.overallScore)}/>
               <Pill label={r.supervisorDecision} bg={dc2(r.supervisorDecision)+"30"} color={dc2(r.supervisorDecision)}/>
               {submission.chunked&&<Pill label={`Full document · ${submission.chunksUsed} sections`} bg="rgba(255,255,255,.15)" color="white"/>}
+              {submission.chunksFailed>0&&<Pill label={`⚠ ${submission.chunksFailed} section${submission.chunksFailed>1?"s":""} unreadable`} bg="#dc2626" color="white"/>}
             </div>
           </div>
           <div style={{display:"flex",gap:6,flexShrink:0}}>
@@ -2314,8 +2347,8 @@ function StudentPortal({db,session,onLogout,showToast}){
     extended?setLoadingExt(true):setLoading(true);setError("");setProgress("");
     try{
       const notes=(sup?`Supervisor: ${sup.name}. `:"")+( stu.extraPrompt||"");
-      const {result,extendedResult,chunked,chunksUsed,charsAnalysed,totalChars}=await analyzeSubmission(text,stu,notes,{extended,citationStyle:citStyle,onProgress:setProgress});
-      const sub={id:"sub_"+uid(),studentId:stu.id,filename:file?.name||"Document",date:new Date().toISOString(),result,chunked,chunksUsed,charsAnalysed,totalChars,...(extendedResult?{extendedResult,citationStyle:citStyle}:{})};
+      const {result,extendedResult,chunked,chunksUsed,chunksFailed,charsAnalysed,totalChars}=await analyzeSubmission(text,stu,notes,{extended,citationStyle:citStyle,onProgress:setProgress});
+      const sub={id:"sub_"+uid(),studentId:stu.id,filename:file?.name||"Document",date:new Date().toISOString(),result,chunked,chunksUsed,chunksFailed,charsAnalysed,totalChars,...(extendedResult?{extendedResult,citationStyle:citStyle}:{})};
       db.setSubmissions(prev=>[...prev,sub]);
       extended?setViewExtSub(sub):setViewSub(sub);
       setFile(null);setText("");
