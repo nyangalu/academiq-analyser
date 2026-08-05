@@ -178,13 +178,14 @@ function parseJsonLoose(raw, failMessage) {
 
 // ── Single-pass (document fits in one call) ─────────────────────────────
 
-async function analyzeDocSingle(text, student, supNotes) {
+async function analyzeDocSingle(text, student, supNotes, docContext) {
   const sys = STRICTNESS_PROMPTS[student.strictness || "strict"];
   const fields = (student.fields || []).join(", ") || "Engineering";
   const level = levelLabel(student);
   const prompt = `Analyse this ${level} engineering project in ${fields} for ${student.initials} ${student.surname} (${student.number}) at a South African university.
 ${student.rubric ? `\nRUBRIC:\n${student.rubric}\n` : ""}
 ${supNotes ? `\nSUPERVISOR NOTES:\n${supNotes}\n` : ""}
+${buildDocContextInstruction(docContext)}
 PROJECT TEXT:
 ---
 ${text}
@@ -195,7 +196,7 @@ Return ONLY valid JSON:
   return parseJsonLoose(raw, "Document may be too large. Try submitting one chapter at a time (under 500KB recommended).");
 }
 
-async function analyzeDocExtendedSingle(text, student, citationStyle, supNotes) {
+async function analyzeDocExtendedSingle(text, student, citationStyle, supNotes, docContext) {
   const fields = (student.fields || []).join(", ") || "Engineering";
   const level = levelLabel(student);
   const styleLabel = CITATION_STYLES.find(s => s.id === citationStyle)?.label || citationStyle;
@@ -203,7 +204,7 @@ async function analyzeDocExtendedSingle(text, student, citationStyle, supNotes) 
 
 Citation style declared: ${styleLabel}
 ${supNotes ? `Supervisor notes: ${supNotes}` : ""}
-
+${buildDocContextInstruction(docContext)}
 PROJECT TEXT (full):
 ---
 ${text}
@@ -295,10 +296,11 @@ Conduct the following comprehensive review and return ONLY valid JSON (no markdo
 
 // ── Map phase: summarise each fragment of a large document ──────────────
 
-async function mapChunkSummary(chunk, index, total, student) {
+async function mapChunkSummary(chunk, index, total, student, docContext) {
   const level = levelLabel(student);
+  const ctxNote = docContext?.documentType === "proposal" ? "Note: this document is a RESEARCH PROPOSAL, not a completed thesis — do not flag the absence of Results/Discussion/Conclusion as a weakness.\n" : docContext?.documentType === "wip" ? "Note: this is a WORK-IN-PROGRESS submission — only note weaknesses within the content actually present; do not flag later chapters as missing.\n" : "";
   const prompt = `You are assisting with a chunked review of a large ${level} engineering document. This is FRAGMENT ${index + 1} of ${total} of the SAME document (it was split purely for processing length — treat it as a slice of a larger whole, not a standalone document).
-
+${ctxNote}
 FRAGMENT TEXT:
 ---
 ${chunk}
@@ -326,7 +328,7 @@ const digestChunks = summaries => summaries.map((c, i) =>
 
 // ── Reduce phase: synthesise the final report from all fragment notes ───
 
-async function reduceStandardFromChunks(chunkSummaries, student, supNotes) {
+async function reduceStandardFromChunks(chunkSummaries, student, supNotes, docContext) {
   const sys = STRICTNESS_PROMPTS[student.strictness || "strict"];
   const fields = (student.fields || []).join(", ") || "Engineering";
   const level = levelLabel(student);
@@ -334,6 +336,7 @@ async function reduceStandardFromChunks(chunkSummaries, student, supNotes) {
   const prompt = `Analyse this ${level} engineering project in ${fields} for ${student.initials} ${student.surname} (${student.number}) at a South African university.
 ${student.rubric ? `\nRUBRIC:\n${student.rubric}\n` : ""}
 ${supNotes ? `\nSUPERVISOR NOTES:\n${supNotes}\n` : ""}
+${buildDocContextInstruction(docContext)}
 This document was too large to read in a single pass, so it was split into ${chunkSummaries.length} sequential fragments covering the FULL document end-to-end, and each fragment was pre-analysed. Below are the fragment-by-fragment notes. Synthesise ONE holistic assessment of the WHOLE document from these notes, exactly as if you had read the entire document directly — do not mention that it was split into fragments anywhere in your output.
 
 FRAGMENT-BY-FRAGMENT NOTES:
@@ -345,7 +348,7 @@ Return ONLY valid JSON:
   return parseJsonLoose(raw, "Could not synthesise the final report from the analysed sections.");
 }
 
-async function reduceExtendedFromChunks(chunkSummaries, student, citationStyle, supNotes) {
+async function reduceExtendedFromChunks(chunkSummaries, student, citationStyle, supNotes, docContext) {
   const fields = (student.fields || []).join(", ") || "Engineering";
   const level = levelLabel(student);
   const styleLabel = CITATION_STYLES.find(s => s.id === citationStyle)?.label || citationStyle;
@@ -354,7 +357,7 @@ async function reduceExtendedFromChunks(chunkSummaries, student, citationStyle, 
 
 Citation style declared: ${styleLabel}
 ${supNotes ? `Supervisor notes: ${supNotes}` : ""}
-
+${buildDocContextInstruction(docContext)}
 This document was too large to read in a single pass, so it was split into ${chunkSummaries.length} sequential fragments covering the FULL document end-to-end, and each fragment was pre-analysed (including any citations and language issues spotted in that fragment). Below are the fragment-by-fragment notes. Synthesise ONE holistic editorial review of the WHOLE document from these notes, exactly as if you had read the entire document directly — do not mention that it was split into fragments anywhere in your output.
 
 FRAGMENT-BY-FRAGMENT NOTES:
@@ -447,16 +450,16 @@ Conduct the following comprehensive review and return ONLY valid JSON (no markdo
 // ── Orchestrator — used by every submission path (student/supervisor/admin/co-supervisor) ──
 
 async function analyzeSubmission(text, student, supNotes, opts = {}) {
-  const { extended = false, citationStyle = "apa", onProgress } = opts;
+  const { extended = false, citationStyle = "apa", onProgress, docContext } = opts;
   const report = txt => onProgress?.(txt);
 
   if (text.length <= SINGLE_PASS_LIMIT) {
     report(extended ? "Analysing…" : "Analysing…");
-    const result = await analyzeDocSingle(text, student, supNotes);
+    const result = await analyzeDocSingle(text, student, supNotes, docContext);
     let extendedResult = null;
     if (extended) {
       report("Running extended review…");
-      extendedResult = await analyzeDocExtendedSingle(text, student, citationStyle, supNotes);
+      extendedResult = await analyzeDocExtendedSingle(text, student, citationStyle, supNotes, docContext);
     }
     return { result, extendedResult, chunked: false, chunksUsed: 1, charsAnalysed: text.length, totalChars: text.length };
   }
@@ -465,14 +468,14 @@ async function analyzeSubmission(text, student, supNotes, opts = {}) {
   const chunkSummaries = [];
   for (let i = 0; i < chunks.length; i++) {
     report(`Analysing section ${i + 1} of ${chunks.length}…`);
-    chunkSummaries.push(await mapChunkSummary(chunks[i], i, chunks.length, student));
+    chunkSummaries.push(await mapChunkSummary(chunks[i], i, chunks.length, student, docContext));
   }
   report("Synthesising full report…");
-  const result = await reduceStandardFromChunks(chunkSummaries, student, supNotes);
+  const result = await reduceStandardFromChunks(chunkSummaries, student, supNotes, docContext);
   let extendedResult = null;
   if (extended) {
     report("Synthesising extended review…");
-    extendedResult = await reduceExtendedFromChunks(chunkSummaries, student, citationStyle, supNotes);
+    extendedResult = await reduceExtendedFromChunks(chunkSummaries, student, citationStyle, supNotes, docContext);
   }
   const charsAnalysed = CHUNK_SIZE + (chunks.length - 1) * (CHUNK_SIZE - CHUNK_OVERLAP);
   const chunksFailed = chunkSummaries.filter(c => c._failed).length;
@@ -488,6 +491,15 @@ const sb  = s => s>=75?"#dcfce7":s>=60?"#dbeafe":s>=50?"#fef3c7":"#fee2e2";
 const pc  = p => ({Critical:"#7f1d1d",Serious:"#dc2626",Important:"#d97706",Minor:"#2563b0"})[p]||"#666";
 const pb  = p => ({Critical:"#450a0a",Serious:"#fee2e2",Important:"#fef3c7",Minor:"#eff6ff"})[p]||"#f5f5f5";
 const dc2 = d => ({APPROVED:"#16a34a","MINOR REVISIONS":"#2563b0","MAJOR REVISIONS":"#d97706","NOT APPROVED":"#dc2626"})[d]||"#666";
+
+// Returns a short display label for a submission's document-type context, or null for
+// a plain full-thesis submission with no special context worth calling out.
+function docTypeBadgeLabel(submission) {
+  if (submission.documentType === "proposal") return "Research Proposal";
+  if (submission.documentType === "wip") return "Work in Progress" + (submission.chaptersReviewed?.length ? ` · ${submission.chaptersReviewed.join(", ")}` : "");
+  if (submission.chapterByChapter) return "Chapter-by-Chapter Review";
+  return null;
+}
 
 // ═══════════════════════════════════════════════════════════════════════
 // SHARED STYLES
@@ -1123,7 +1135,7 @@ function writeStandardReport(w, submission, student) {
   if (!r) return;
   w.h1("Assessment Report");
   w.para(`${student.initials || ""} ${student.surname || ""}  ·  ${student.number || ""}  ·  ${student.level || ""}`, { size: 10, bold: true, color: "#0f172a", gap: 2 });
-  w.para(`${submission.filename || "Document"}  ·  Submitted ${new Date(submission.date).toLocaleDateString("en-ZA")}${submission.submittedBy ? "  ·  Submitted by " + submission.submittedBy : ""}${submission.chunked ? "  ·  Full document analysed in " + submission.chunksUsed + " sections" : ""}${submission.chunksFailed ? "  ·  Warning: " + submission.chunksFailed + " section(s) could not be read" : ""}`, { size: 9, color: "#64748b", gap: 8 });
+  w.para(`${submission.filename || "Document"}  ·  Submitted ${new Date(submission.date).toLocaleDateString("en-ZA")}${submission.submittedBy ? "  ·  Submitted by " + submission.submittedBy : ""}${docTypeBadgeLabel(submission) ? "  ·  " + docTypeBadgeLabel(submission) : ""}${submission.chunked ? "  ·  Full document analysed in " + submission.chunksUsed + " sections" : ""}${submission.chunksFailed ? "  ·  Warning: " + submission.chunksFailed + " section(s) could not be read" : ""}`, { size: 9, color: "#64748b", gap: 8 });
   w.rule();
 
   w.h2("Overall Result");
@@ -1257,6 +1269,69 @@ const CITATION_STYLES = [
 ];
 
 // ═══════════════════════════════════════════════════════════════════════
+// DOCUMENT TYPE / CHAPTER SELECTION
+// ═══════════════════════════════════════════════════════════════════════
+
+const DOCUMENT_TYPES = [
+  {id:"full",     label:"Full Thesis"},
+  {id:"proposal", label:"Research Proposal"},
+  {id:"wip",      label:"Work in Progress"},
+];
+
+const CHAPTER_OPTIONS = ["Introduction","Literature Review","Methodology / Research Design","Results","Discussion","Conclusion & Recommendations","References","Appendices"];
+
+// Builds the extra prompt instruction block that calibrates the AI's assessment
+// to the selected document type — reuses the existing report schema entirely,
+// so no changes are needed anywhere else in the app (rendering, PDF, etc.).
+function buildDocContextInstruction(docContext) {
+  if (!docContext) return "";
+  const { documentType = "full", chapters = [], chapterByChapter = false } = docContext;
+  if (documentType === "proposal") {
+    return `\nASSESSMENT CONTEXT — RESEARCH PROPOSAL: This document is a RESEARCH PROPOSAL, not a completed thesis or in-progress report. Assess it against research-proposal expectations only: clarity of the problem statement and motivation, feasibility of the proposed approach, adequacy of the preliminary/planned literature review, methodological soundness of the PLANNED approach (it has not been executed yet, so judge the plan itself, not results), the research plan/timeline, risk identification, and ethical considerations. Do NOT penalise the student for the absence of Results, Discussion, or Conclusion chapters — a proposal by definition does not contain these; do not list their absence as a critical issue or weakness. Frame "supervisorDecision" as approval to proceed with the proposed research, not as a final-thesis verdict.\n`;
+  }
+  if (documentType === "wip") {
+    const list = chapters.length ? chapters.join(", ") : "only the chapters actually present in the submitted text";
+    return `\nASSESSMENT CONTEXT — WORK IN PROGRESS: This is a WORK-IN-PROGRESS submission. The supervisor has indicated that ONLY the following chapters/sections are ready for review at this stage: ${list}. Base your "sections" array and overall assessment ONLY on these chapters. Do NOT penalise the student for the absence of later chapters that are not yet due (e.g. Results, Discussion, Conclusion) if they fall outside this list — treat those simply as "not yet submitted", not as a deficiency, and do not list their absence as a critical issue. The overallScore and supervisorDecision should reflect the quality of the SUBMITTED chapters only, not the completeness of the thesis as a whole.\n`;
+  }
+  if (chapterByChapter) {
+    return `\nASSESSMENT CONTEXT — CHAPTER-BY-CHAPTER: This is a full thesis/research report. Structure the "sections" array to follow the ACTUAL chapter structure of this specific document (e.g. "Chapter 1: Introduction", "Chapter 2: Literature Review", using the real chapter numbers/titles from the document itself where possible) rather than generic evaluation categories. Produce one entry per chapter, each thoroughly assessed with its own score, strengths, weaknesses and supervisor instruction.\n`;
+  }
+  return "";
+}
+
+// Shared UI for picking document type (+ chapters when relevant). Used by both the
+// supervisor/admin/co-supervisor submit modal and the student's own submit form.
+function DocTypeSelector({docType,setDocType,chapters,setChapters,chapterByChapter,setChapterByChapter,customChapters,setCustomChapters}) {
+  return (
+    <div style={{marginBottom:12}}>
+      <label style={LS}>Analysis Type</label>
+      <div style={{display:"flex",gap:6,marginBottom:docType!=="full"||chapterByChapter!==undefined?8:0}}>
+        {DOCUMENT_TYPES.map(t=>(
+          <button key={t.id} type="button" onClick={()=>setDocType(t.id)} style={{flex:1,padding:"7px 8px",borderRadius:8,border:docType===t.id?"2px solid #3b82f6":"1px solid #e2e8f0",background:docType===t.id?"#eff6ff":"white",color:docType===t.id?"#1e40af":"#64748b",fontWeight:600,fontSize:11.5,cursor:"pointer"}}>{t.label}</button>
+        ))}
+      </div>
+      {docType==="wip"&&(
+        <div style={{marginTop:8,marginBottom:4}}>
+          <label style={{...LS,fontSize:10.5}}>Which chapters are ready for review? (select at least one)</label>
+          <div style={{display:"flex",flexWrap:"wrap",gap:6,marginTop:6}}>
+            {CHAPTER_OPTIONS.map(ch=>(
+              <button key={ch} type="button" onClick={()=>setChapters(prev=>prev.includes(ch)?prev.filter(c=>c!==ch):[...prev,ch])} style={{padding:"5px 10px",borderRadius:99,border:chapters.includes(ch)?"1.5px solid #16a34a":"1px solid #e2e8f0",background:chapters.includes(ch)?"#f0fdf4":"white",color:chapters.includes(ch)?"#16a34a":"#64748b",fontSize:11,fontWeight:600,cursor:"pointer"}}>{ch}</button>
+            ))}
+          </div>
+          <input value={customChapters} onChange={e=>setCustomChapters(e.target.value)} placeholder="Other chapters (comma-separated)…" style={{...IS,marginTop:8,fontSize:12,padding:"7px 10px"}}/>
+        </div>
+      )}
+      {docType==="full"&&(
+        <label style={{display:"flex",alignItems:"center",gap:7,fontSize:12,color:"#374151",cursor:"pointer",marginTop:4}}>
+          <input type="checkbox" checked={chapterByChapter} onChange={e=>setChapterByChapter(e.target.checked)}/>
+          Break down analysis chapter-by-chapter (matches the document's actual chapter structure)
+        </label>
+      )}
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════
 // EXTENDED FEEDBACK MODAL
 // ═══════════════════════════════════════════════════════════════════════
 
@@ -1293,6 +1368,7 @@ function ExtendedFeedbackModal({submission,students,onClose}){
               <span style={{background:"rgba(255,255,255,.15)",color:"white",padding:"3px 10px",borderRadius:99,fontSize:12,fontWeight:600}}>Citation: {r.citationReview?.declaredStyle}</span>
               <span style={{background:sc(r.aiDetection?.estimatedAiPercentage>50?30:70)+"30",color:r.aiDetection?.estimatedAiPercentage>50?"#fca5a5":"#86efac",padding:"3px 10px",borderRadius:99,fontSize:12,fontWeight:600}}>AI Usage: ~{r.aiDetection?.estimatedAiPercentage}%</span>
               <span style={{background:"rgba(255,255,255,.1)",color:"rgba(255,255,255,.8)",padding:"3px 10px",borderRadius:99,fontSize:12}}>Language: {r.languageReview?.overallLanguageScore}/100</span>
+              {docTypeBadgeLabel(submission)&&<span style={{background:"rgba(255,255,255,.15)",color:"white",padding:"3px 10px",borderRadius:99,fontSize:12,fontWeight:600}}>{docTypeBadgeLabel(submission)}</span>}
               {submission.chunked&&<span style={{background:"rgba(255,255,255,.15)",color:"white",padding:"3px 10px",borderRadius:99,fontSize:12,fontWeight:600}}>Full document · {submission.chunksUsed} sections</span>}
               {submission.chunksFailed>0&&<span style={{background:"#dc2626",color:"white",padding:"3px 10px",borderRadius:99,fontSize:12,fontWeight:600}}>⚠ {submission.chunksFailed} section{submission.chunksFailed>1?"s":""} unreadable</span>}
             </div>
@@ -1611,6 +1687,10 @@ function SupSubmitModal({db,student,onClose,showToast,actor}){
   const[file,setFile]=useState(null);
   const[text,setText]=useState("");
   const[citStyle,setCitStyle]=useState("apa");
+  const[docType,setDocType]=useState("full");
+  const[chapters,setChapters]=useState([]);
+  const[chapterByChapter,setChapterByChapter]=useState(false);
+  const[customChapters,setCustomChapters]=useState("");
   const[loading,setLoading]=useState(false);
   const[loadingExt,setLoadingExt]=useState(false);
   const[error,setError]=useState("");
@@ -1643,13 +1723,16 @@ function SupSubmitModal({db,student,onClose,showToast,actor}){
   const[progress,setProgress]=useState("");
   const submit=async(extended)=>{
     if(!text.trim())return setError("Upload a document first.");
+    const allChapters=[...chapters,...customChapters.split(",").map(c=>c.trim()).filter(Boolean)];
+    if(docType==="wip"&&allChapters.length===0)return setError("Select at least one chapter that's ready for review.");
     extended?setLoadingExt(true):setLoading(true);setError("");setProgress("");
     try{
       const actorPrefix=actorRole==="admin"?`Admin: ${actorName||"Administrator"}. `:actorRole==="cosupervisor"?`Co-Supervisor: ${actorName||""}. `:actorName?`Supervisor: ${actorName}. `:"";
       const notes=actorPrefix+(student.extraPrompt||"");
-      const {result,extendedResult,chunked,chunksUsed,chunksFailed,charsAnalysed,totalChars}=await analyzeSubmission(text,student,notes,{extended,citationStyle:citStyle,onProgress:setProgress});
+      const docContext={documentType:docType,chapters:allChapters,chapterByChapter};
+      const {result,extendedResult,chunked,chunksUsed,chunksFailed,charsAnalysed,totalChars}=await analyzeSubmission(text,student,notes,{extended,citationStyle:citStyle,onProgress:setProgress,docContext});
       const submittedByLabel=actorRole==="admin"?(actorName?`admin (${actorName})`:"admin"):actorRole==="cosupervisor"?(actorName?`co-supervisor (${actorName})`:"co-supervisor"):"supervisor";
-      const sub={id:"sub_"+uid(),studentId:student.id,filename:file?.name||"Document",date:new Date().toISOString(),submittedBy:submittedByLabel,result,chunked,chunksUsed,chunksFailed,charsAnalysed,totalChars,...(extendedResult?{extendedResult,citationStyle:citStyle}:{})};
+      const sub={id:"sub_"+uid(),studentId:student.id,filename:file?.name||"Document",date:new Date().toISOString(),submittedBy:submittedByLabel,result,chunked,chunksUsed,chunksFailed,charsAnalysed,totalChars,documentType:docType,chaptersReviewed:docType==="wip"?allChapters:null,chapterByChapter:docType==="full"?chapterByChapter:false,...(extendedResult?{extendedResult,citationStyle:citStyle}:{})};
       db.setSubmissions(prev=>[...prev,sub]);
       showToast(extended?"Extended analysis complete!":"Analysis complete!");
       onClose();
@@ -1663,6 +1746,7 @@ function SupSubmitModal({db,student,onClose,showToast,actor}){
       <div style={{background:"#f8fafc",borderRadius:10,padding:"9px 12px",marginBottom:13,fontSize:13}}>
         <span style={{color:sl?.color||"#d97706",fontWeight:700}}>{sl?.label}</span> · {student.level} · {(student.fields||[]).slice(0,2).join(", ")}
       </div>
+      <DocTypeSelector docType={docType} setDocType={setDocType} chapters={chapters} setChapters={setChapters} chapterByChapter={chapterByChapter} setChapterByChapter={setChapterByChapter} customChapters={customChapters} setCustomChapters={setCustomChapters}/>
       <label style={LS}>Citation Style Used in Document</label>
       <select value={citStyle} onChange={e=>setCitStyle(e.target.value)} style={{...IS,marginBottom:12}}>
         {CITATION_STYLES.map(s=><option key={s.id} value={s.id}>{s.label}</option>)}
@@ -1708,6 +1792,7 @@ function FeedbackModal({submission,students,onClose}){
             <div style={{display:"flex",gap:7,marginTop:7,flexWrap:"wrap"}}>
               <Pill label={`${r.overallScore}% · ${r.overallGrade}`} bg={sb(r.overallScore)} color={sc(r.overallScore)}/>
               <Pill label={r.supervisorDecision} bg={dc2(r.supervisorDecision)+"30"} color={dc2(r.supervisorDecision)}/>
+              {docTypeBadgeLabel(submission)&&<Pill label={docTypeBadgeLabel(submission)} bg="rgba(255,255,255,.15)" color="white"/>}
               {submission.chunked&&<Pill label={`Full document · ${submission.chunksUsed} sections`} bg="rgba(255,255,255,.15)" color="white"/>}
               {submission.chunksFailed>0&&<Pill label={`⚠ ${submission.chunksFailed} section${submission.chunksFailed>1?"s":""} unreadable`} bg="#dc2626" color="white"/>}
             </div>
@@ -2315,6 +2400,7 @@ function StudentPortal({db,session,onLogout,showToast}){
   const[file,setFile]=useState(null);const[text,setText]=useState("");
   const[loading,setLoading]=useState(false);const[loadingExt,setLoadingExt]=useState(false);
   const[error,setError]=useState("");const[citStyle,setCitStyle]=useState("apa");
+  const[docType,setDocType]=useState("full");const[chapters,setChapters]=useState([]);const[chapterByChapter,setChapterByChapter]=useState(false);const[customChapters,setCustomChapters]=useState("");
   const[viewSub,setViewSub]=useState(null);const[viewExtSub,setViewExtSub]=useState(null);
 
   const mySubs=db.submissions.filter(s=>s.studentId===stu.id);
@@ -2344,11 +2430,14 @@ function StudentPortal({db,session,onLogout,showToast}){
   const[progress,setProgress]=useState("");
   const handleSubmit=async(extended=false)=>{
     if(!text.trim())return setError("Upload a document first.");
+    const allChapters=[...chapters,...customChapters.split(",").map(c=>c.trim()).filter(Boolean)];
+    if(docType==="wip"&&allChapters.length===0)return setError("Select at least one chapter that's ready for review.");
     extended?setLoadingExt(true):setLoading(true);setError("");setProgress("");
     try{
       const notes=(sup?`Supervisor: ${sup.name}. `:"")+( stu.extraPrompt||"");
-      const {result,extendedResult,chunked,chunksUsed,chunksFailed,charsAnalysed,totalChars}=await analyzeSubmission(text,stu,notes,{extended,citationStyle:citStyle,onProgress:setProgress});
-      const sub={id:"sub_"+uid(),studentId:stu.id,filename:file?.name||"Document",date:new Date().toISOString(),result,chunked,chunksUsed,chunksFailed,charsAnalysed,totalChars,...(extendedResult?{extendedResult,citationStyle:citStyle}:{})};
+      const docContext={documentType:docType,chapters:allChapters,chapterByChapter};
+      const {result,extendedResult,chunked,chunksUsed,chunksFailed,charsAnalysed,totalChars}=await analyzeSubmission(text,stu,notes,{extended,citationStyle:citStyle,onProgress:setProgress,docContext});
+      const sub={id:"sub_"+uid(),studentId:stu.id,filename:file?.name||"Document",date:new Date().toISOString(),result,chunked,chunksUsed,chunksFailed,charsAnalysed,totalChars,documentType:docType,chaptersReviewed:docType==="wip"?allChapters:null,chapterByChapter:docType==="full"?chapterByChapter:false,...(extendedResult?{extendedResult,citationStyle:citStyle}:{})};
       db.setSubmissions(prev=>[...prev,sub]);
       extended?setViewExtSub(sub):setViewSub(sub);
       setFile(null);setText("");
@@ -2380,6 +2469,7 @@ function StudentPortal({db,session,onLogout,showToast}){
           <div style={{background:"white",borderRadius:16,border:"1px solid #e2e8f0",padding:"1.75rem"}}>
             <h2 style={{fontSize:16,fontWeight:700,marginBottom:4}}>Submit Your Project</h2>
             <p style={{fontSize:13,color:"#64748b",marginBottom:16}}>Upload your project document for AI-powered analysis.</p>
+            <DocTypeSelector docType={docType} setDocType={setDocType} chapters={chapters} setChapters={setChapters} chapterByChapter={chapterByChapter} setChapterByChapter={setChapterByChapter} customChapters={customChapters} setCustomChapters={setCustomChapters}/>
             <div style={{marginBottom:13}}>
               <label style={LS}>Citation Style Used in Your Document</label>
               <select value={citStyle} onChange={e=>setCitStyle(e.target.value)} style={IS}>
