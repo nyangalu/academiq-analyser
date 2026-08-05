@@ -1123,7 +1123,7 @@ function writeStandardReport(w, submission, student) {
   if (!r) return;
   w.h1("Assessment Report");
   w.para(`${student.initials || ""} ${student.surname || ""}  ·  ${student.number || ""}  ·  ${student.level || ""}`, { size: 10, bold: true, color: "#0f172a", gap: 2 });
-  w.para(`${submission.filename || "Document"}  ·  Submitted ${new Date(submission.date).toLocaleDateString("en-ZA")}${submission.submittedBy ? "  ·  Submitted by " + submission.submittedBy : ""}${submission.chunked ? "  ·  Full document analysed in " + submission.chunksUsed + " sections" : ""}${submission.chunksFailed ? "  ·  ⚠ " + submission.chunksFailed + " section(s) could not be read" : ""}`, { size: 9, color: "#64748b", gap: 8 });
+  w.para(`${submission.filename || "Document"}  ·  Submitted ${new Date(submission.date).toLocaleDateString("en-ZA")}${submission.submittedBy ? "  ·  Submitted by " + submission.submittedBy : ""}${submission.chunked ? "  ·  Full document analysed in " + submission.chunksUsed + " sections" : ""}${submission.chunksFailed ? "  ·  Warning: " + submission.chunksFailed + " section(s) could not be read" : ""}`, { size: 9, color: "#64748b", gap: 8 });
   w.rule();
 
   w.h2("Overall Result");
@@ -1132,8 +1132,8 @@ function writeStandardReport(w, submission, student) {
   w.spacer(4);
   if (r.overallVerdict) w.para(r.overallVerdict, { size: 9.5, color: "#0c4a6e", gap: 10 });
 
-  if (r.positives?.length) w.bulletBlock("Strengths", r.positives, { color: "#14532d", bg: "#f0fdf4", mark: "✓", titleColor: "#16a34a" });
-  if (r.criticalIssues?.length) w.bulletBlock("Critical Issues", r.criticalIssues, { color: "#7f1d1d", bg: "#fee2e2", mark: "✗", titleColor: "#dc2626" });
+  if (r.positives?.length) w.bulletBlock("Strengths", r.positives, { color: "#14532d", bg: "#f0fdf4", mark: "+", titleColor: "#16a34a" });
+  if (r.criticalIssues?.length) w.bulletBlock("Critical Issues", r.criticalIssues, { color: "#7f1d1d", bg: "#fee2e2", mark: "-", titleColor: "#dc2626" });
 
   if (r.sections?.length) {
     w.rule();
@@ -1174,9 +1174,9 @@ function writeExtendedReport(w, submission, student) {
     w.h2("Language & Grammar");
     w.scoreRow("Overall Language Score", x.languageReview.overallLanguageScore, null);
     w.scoreRow("Readability", x.languageReview.readabilityScore, x.languageReview.readabilityComment);
-    if (x.languageReview.spellingErrors?.length) w.bulletBlock("Spelling Errors", x.languageReview.spellingErrors.map(e => `${e.original} → ${e.correction}${e.context ? "  (\"" + e.context + "\")" : ""}`), { color: "#7f1d1d", bg: "#fee2e2", titleColor: "#dc2626" });
-    if (x.languageReview.grammarErrors?.length) w.bulletBlock("Grammar Issues", x.languageReview.grammarErrors.map(e => `${e.issue}${e.location ? "  (\"" + e.location + "\")" : ""}${e.suggestion ? "  → " + e.suggestion : ""}`), { color: "#78350f", bg: "#fffbeb", titleColor: "#d97706" });
-    if (x.languageReview.styleIssues?.length) w.bulletBlock("Style Issues", x.languageReview.styleIssues.map(e => `${e.type}${e.location ? "  (\"" + e.location + "\")" : ""}${e.suggestion ? "  → " + e.suggestion : ""}`), { color: "#1e3a8a", bg: "#eff6ff", titleColor: "#2563b0" });
+    if (x.languageReview.spellingErrors?.length) w.bulletBlock("Spelling Errors", x.languageReview.spellingErrors.map(e => `${e.original} -> ${e.correction}${e.context ? "  (\"" + e.context + "\")" : ""}`), { color: "#7f1d1d", bg: "#fee2e2", titleColor: "#dc2626" });
+    if (x.languageReview.grammarErrors?.length) w.bulletBlock("Grammar Issues", x.languageReview.grammarErrors.map(e => `${e.issue}${e.location ? "  (\"" + e.location + "\")" : ""}${e.suggestion ? "  -> " + e.suggestion : ""}`), { color: "#78350f", bg: "#fffbeb", titleColor: "#d97706" });
+    if (x.languageReview.styleIssues?.length) w.bulletBlock("Style Issues", x.languageReview.styleIssues.map(e => `${e.type}${e.location ? "  (\"" + e.location + "\")" : ""}${e.suggestion ? "  -> " + e.suggestion : ""}`), { color: "#1e3a8a", bg: "#eff6ff", titleColor: "#2563b0" });
     w.rule();
   }
 
@@ -1186,8 +1186,8 @@ function writeExtendedReport(w, submission, student) {
     w.scoreRow("Relevance", x.literatureReview.relevanceScore, x.literatureReview.relevanceComment);
     w.scoreRow("Critical Analysis", x.literatureReview.criticalAnalysisScore, x.literatureReview.criticalAnalysisComment);
     w.scoreRow("Flow", x.literatureReview.flowScore, x.literatureReview.flowComment);
-    if (x.literatureReview.gaps?.length) w.bulletBlock("Gaps Identified", x.literatureReview.gaps, { color: "#7f1d1d", mark: "✗", titleColor: "#dc2626" });
-    if (x.literatureReview.strengths?.length) w.bulletBlock("Strengths", x.literatureReview.strengths, { color: "#14532d", mark: "✓", titleColor: "#16a34a" });
+    if (x.literatureReview.gaps?.length) w.bulletBlock("Gaps Identified", x.literatureReview.gaps, { color: "#7f1d1d", mark: "-", titleColor: "#dc2626" });
+    if (x.literatureReview.strengths?.length) w.bulletBlock("Strengths", x.literatureReview.strengths, { color: "#14532d", mark: "+", titleColor: "#16a34a" });
     w.rule();
   }
 
@@ -1198,10 +1198,10 @@ function writeExtendedReport(w, submission, student) {
     w.kvLine("Orphaned References", x.citationReview.orphanedReferences?.length || 0);
     w.spacer(4);
     if (x.citationReview.citationIssuesSummary) w.para(x.citationReview.citationIssuesSummary, { size: 9.3, color: "#0c4a6e", gap: 8 });
-    if (x.citationReview.inTextCitations?.length) w.bulletBlock("In-Text Citations", x.citationReview.inTextCitations.map(c => `${c.citation}${c.isCorrect ? " ✓" : "  ⚠ " + (c.issue || "") + (c.correction ? "  → " + c.correction : "")}`), { color: "#334155", titleColor: "#374151" });
-    if (x.citationReview.referenceList?.length) w.bulletBlock("Reference List", x.citationReview.referenceList.map(rf => `${rf.fullReference}${rf.isCorrect ? "" : "  ⚠ " + (rf.issue || "") + (rf.correction ? "  → " + rf.correction : "")}`), { color: "#334155", titleColor: "#374151" });
-    if (x.citationReview.missingReferences?.length) w.bulletBlock("Cited but not in Reference List", x.citationReview.missingReferences, { color: "#7f1d1d", mark: "✗", titleColor: "#dc2626" });
-    if (x.citationReview.orphanedReferences?.length) w.bulletBlock("In Reference List but not Cited", x.citationReview.orphanedReferences, { color: "#78350f", mark: "⚠", titleColor: "#d97706" });
+    if (x.citationReview.inTextCitations?.length) w.bulletBlock("In-Text Citations", x.citationReview.inTextCitations.map(c => `${c.citation}${c.isCorrect ? " (correct)" : "  Issue: " + (c.issue || "") + (c.correction ? "  -> " + c.correction : "")}`), { color: "#334155", titleColor: "#374151" });
+    if (x.citationReview.referenceList?.length) w.bulletBlock("Reference List", x.citationReview.referenceList.map(rf => `${rf.fullReference}${rf.isCorrect ? "" : "  Issue: " + (rf.issue || "") + (rf.correction ? "  -> " + rf.correction : "")}`), { color: "#334155", titleColor: "#374151" });
+    if (x.citationReview.missingReferences?.length) w.bulletBlock("Cited but not in Reference List", x.citationReview.missingReferences, { color: "#7f1d1d", mark: "-", titleColor: "#dc2626" });
+    if (x.citationReview.orphanedReferences?.length) w.bulletBlock("In Reference List but not Cited", x.citationReview.orphanedReferences, { color: "#78350f", mark: "!", titleColor: "#d97706" });
     w.rule();
   }
 
@@ -1212,7 +1212,7 @@ function writeExtendedReport(w, submission, student) {
     w.spacer(4);
     if (x.aiDetection.aiComment) w.para(x.aiDetection.aiComment, { size: 9.3, gap: 8 });
     if (x.aiDetection.aiSections?.length) w.bulletBlock("Suspected AI-Generated Sections", x.aiDetection.aiSections.map(s => `${s.section} — ${s.likelihood} likelihood${s.excerpt ? "  (\"" + s.excerpt + "…\")" : ""}`), { color: "#7f1d1d", bg: "#fee2e2", titleColor: "#dc2626" });
-    if (x.aiDetection.humanSections?.length) w.bulletBlock("Human-Written Sections", x.aiDetection.humanSections, { color: "#14532d", mark: "✓", titleColor: "#16a34a" });
+    if (x.aiDetection.humanSections?.length) w.bulletBlock("Human-Written Sections", x.aiDetection.humanSections, { color: "#14532d", mark: "+", titleColor: "#16a34a" });
     w.rule();
   }
 
@@ -1221,8 +1221,8 @@ function writeExtendedReport(w, submission, student) {
     w.scoreRow("Overall Flow", x.informationFlow.overallFlowScore, x.informationFlow.logicalProgressionComment);
     w.kvLine("Transition Quality", x.informationFlow.transitionQuality || "—");
     w.spacer(4);
-    if (x.informationFlow.sectionFlow?.length) w.bulletBlock("Section-by-Section Flow", x.informationFlow.sectionFlow.map(s => `${s.section} — ${s.flowScore}/100: ${s.comment}${s.issue ? "  ⚠ " + s.issue : ""}`), { color: "#334155", titleColor: "#374151" });
-    if (x.informationFlow.recommendations?.length) w.bulletBlock("Recommendations", x.informationFlow.recommendations, { color: "#1e40af", mark: "→", titleColor: "#374151" });
+    if (x.informationFlow.sectionFlow?.length) w.bulletBlock("Section-by-Section Flow", x.informationFlow.sectionFlow.map(s => `${s.section} — ${s.flowScore}/100: ${s.comment}${s.issue ? "  Issue: " + s.issue : ""}`), { color: "#334155", titleColor: "#374151" });
+    if (x.informationFlow.recommendations?.length) w.bulletBlock("Recommendations", x.informationFlow.recommendations, { color: "#1e40af", mark: "-", titleColor: "#374151" });
     w.rule();
   }
 
