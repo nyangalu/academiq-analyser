@@ -1032,227 +1032,268 @@ async function extractPdfText(file) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// PDF REPORT GENERATION (jsPDF — client-side, no server round-trip)
+// PDF REPORT GENERATION — renders the SAME styled HTML as the on-screen
+// report (via a hidden off-screen container + html2canvas), then slices
+// it into A4 pages at safe boundaries so no line of text is ever cut.
+// This guarantees the PDF visually matches the in-app report exactly,
+// since it's the browser's own text engine doing the layout, not jsPDF's.
 // ═══════════════════════════════════════════════════════════════════════
 
-const hexRgb = hex => {
-  const h = (hex || "#666666").replace("#", "");
-  const n = h.length === 3 ? h.split("").map(c => c + c).join("") : h;
-  const v = parseInt(n, 16);
-  return [(v >> 16) & 255, (v >> 8) & 255, v & 255];
-};
+const esc = s => String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 
-function makePdfWriter(doc) {
-  const pageW = doc.internal.pageSize.getWidth();
-  const pageH = doc.internal.pageSize.getHeight();
-  const margin = 42;
-  const contentW = pageW - margin * 2;
-  let y = margin;
-
-  const newPage = () => { doc.addPage(); y = margin; };
-  const ensure = need => { if (y + need > pageH - 46) newPage(); };
-  const setColor = (hex, kind = "text") => {
-    const [r, g, b] = hexRgb(hex);
-    kind === "fill" ? doc.setFillColor(r, g, b) : kind === "draw" ? doc.setDrawColor(r, g, b) : doc.setTextColor(r, g, b);
-  };
-
-  const rule = (color = "#e2e8f0") => { ensure(10); setColor(color, "draw"); doc.setLineWidth(0.6); doc.line(margin, y, pageW - margin, y); y += 12; };
-
-  const h1 = txt => { ensure(26); doc.setFont("helvetica", "bold"); doc.setFontSize(16); setColor("#0f172a"); doc.text(txt, margin, y); y += 22; };
-  const h2 = txt => { ensure(20); doc.setFont("helvetica", "bold"); doc.setFontSize(12.5); setColor("#0f172a"); doc.text(txt, margin, y); y += 16; };
-  const h3 = (txt, color = "#374151") => { ensure(16); doc.setFont("helvetica", "bold"); doc.setFontSize(10.5); setColor(color); doc.text(txt, margin, y); y += 14; };
-
-  const para = (txt, opts = {}) => {
-    if (!txt) return;
-    const size = opts.size || 9.5;
-    doc.setFont("helvetica", opts.bold ? "bold" : "normal");
-    doc.setFontSize(size);
-    setColor(opts.color || "#334155");
-    const lines = doc.splitTextToSize(String(txt), opts.width || contentW);
-    const lh = opts.lineHeight || size * 1.35;
-    lines.forEach(line => { ensure(lh); doc.text(line, margin + (opts.indent || 0), y); y += lh; });
-    y += opts.gap ?? 4;
-  };
-
-  const bulletBlock = (title, items, { color = "#334155", bg = null, mark = "•", titleColor = "#374151" } = {}) => {
-    if (!items || !items.length) return;
-    h3(title, titleColor);
-    items.forEach(it => {
-      const size = 9.3;
-      doc.setFont("helvetica", "normal"); doc.setFontSize(size);
-      const lines = doc.splitTextToSize(`${mark} ${it}`, contentW - 10);
-      const boxH = lines.length * (size * 1.35) + 6;
-      ensure(boxH);
-      if (bg) { setColor(bg, "fill"); doc.roundedRect(margin, y - 2, contentW, boxH, 2, 2, "F"); }
-      setColor(color);
-      lines.forEach((line, i) => { doc.text(line, margin + 6, y + i * (size * 1.35) + 7); });
-      y += boxH + 3;
-    });
-    y += 4;
-  };
-
-  const scoreRow = (label, score, comment) => {
-    ensure(34);
-    const color = sc(score);
-    doc.setFont("helvetica", "bold"); doc.setFontSize(9.8); setColor("#374151");
-    doc.text(label, margin, y);
-    doc.setFont("helvetica", "bold"); doc.setFontSize(12); setColor(color);
-    doc.text(`${score}/100`, pageW - margin, y, { align: "right" });
-    y += 9;
-    setColor("#e2e8f0", "fill"); doc.roundedRect(margin, y, contentW, 4, 2, 2, "F");
-    setColor(color, "fill"); doc.roundedRect(margin, y, contentW * Math.max(0, Math.min(100, score)) / 100, 4, 2, 2, "F");
-    y += 12;
-    if (comment) para(comment, { size: 9, color: "#64748b", gap: 6 });
-    else y += 4;
-  };
-
-  const kvLine = (label, value) => {
-    ensure(13);
-    doc.setFont("helvetica", "bold"); doc.setFontSize(9); setColor("#64748b");
-    doc.text(label + ":", margin, y);
-    doc.setFont("helvetica", "normal"); setColor("#0f172a");
-    doc.text(String(value ?? "—"), margin + 100, y);
-    y += 13;
-  };
-
-  const spacer = n => { y += n; };
-
-  const footer = () => {
-    const pages = doc.internal.getNumberOfPages();
-    for (let i = 1; i <= pages; i++) {
-      doc.setPage(i);
-      setColor("#94a3b8"); doc.setFont("helvetica", "normal"); doc.setFontSize(8);
-      doc.text("AcademiQ Analyser — Generated report, for supervisory use", margin, pageH - 22);
-      doc.text(`Page ${i} of ${pages}`, pageW - margin, pageH - 22, { align: "right" });
-    }
-  };
-
-  return { doc, get y() { return y; }, set y(v) { y = v; }, contentW, margin, newPage, ensure, setColor, rule, h1, h2, h3, para, bulletBlock, scoreRow, kvLine, spacer, footer };
+// Every "atomic" block that must never be split across a page break gets class="pb".
+function pdfListBlock(title, items, color, bg, mark, titleColor) {
+  if (!items || !items.length) return "";
+  return `<div class="pb" style="margin-bottom:14px;">
+    <div style="font-size:11.5px;font-weight:800;color:${titleColor};text-transform:uppercase;letter-spacing:.04em;margin-bottom:7px;">${esc(title)}</div>
+    ${items.map(it => `<div class="pb" style="background:${bg};color:${color};border-radius:8px;padding:9px 12px;margin-bottom:6px;font-size:12.5px;line-height:1.55;">${mark} ${esc(it)}</div>`).join("")}
+  </div>`;
 }
 
-function writeStandardReport(w, submission, student) {
+function pdfSectionsBlock(sections) {
+  if (!sections || !sections.length) return "";
+  return `<div style="margin-bottom:6px;">
+    <div class="pb" style="font-size:15px;font-weight:800;margin:0 0 14px;border-top:1px solid #e2e8f0;padding-top:20px;">Section-by-Section Breakdown</div>
+    ${sections.map(s => {
+      const c = sc(s.score), b = sb(s.score);
+      return `<div class="pb" style="margin-bottom:16px;background:#fafbfc;border:1px solid #f1f5f9;border-radius:10px;padding:14px 16px;">
+        <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:6px;">
+          <span style="font-weight:700;font-size:13px;">${esc(s.name)} <span style="font-weight:500;color:#64748b;">(Grade: ${esc(s.grade || "—")})</span></span>
+          <span style="font-weight:800;font-size:13px;color:${c};">${s.score}/100</span>
+        </div>
+        <div style="height:5px;background:#e2e8f0;border-radius:3px;margin-bottom:10px;overflow:hidden;"><div style="height:100%;width:${Math.max(0, Math.min(100, s.score))}%;background:${c};"></div></div>
+        ${pdfListBlock("Strengths", s.strengths, "#166534", "#f0fdf4", "+", "#16a34a")}
+        ${pdfListBlock("Weaknesses", s.weaknesses, "#7f1d1d", "#fee2e2", "-", "#dc2626")}
+        ${s.supervisorInstruction ? `<div class="pb" style="background:#fffbeb;color:#78350f;border-radius:8px;padding:9px 12px;font-size:12px;line-height:1.55;"><strong>Instruction:</strong> ${esc(s.supervisorInstruction)}</div>` : ""}
+      </div>`;
+    }).join("")}
+  </div>`;
+}
+
+function pdfPriorityBlock(actions) {
+  if (!actions || !actions.length) return "";
+  return `<div style="margin-bottom:6px;">
+    <div class="pb" style="font-size:15px;font-weight:800;margin:0 0 12px;border-top:1px solid #e2e8f0;padding-top:20px;">Priority Actions</div>
+    ${actions.map(a => `<div class="pb" style="background:${pb(a.priority)};color:${pc(a.priority)};border-radius:8px;padding:9px 12px;margin-bottom:6px;font-size:12.5px;line-height:1.55;"><strong>[${esc(a.priority)}]</strong> ${esc(a.action)}</div>`).join("")}
+  </div>`;
+}
+
+function pdfParaBlock(title, text) {
+  if (!text) return "";
+  return `<div class="pb" style="margin-bottom:6px;border-top:1px solid #e2e8f0;padding-top:20px;">
+    <div style="font-size:13px;font-weight:800;margin:0 0 8px;">${esc(title)}</div>
+    <p style="font-size:12.5px;line-height:1.65;color:#334155;margin:0;">${esc(text)}</p>
+  </div>`;
+}
+
+function pdfScoreLine(label, score, comment) {
+  const c = sc(score);
+  return `<div class="pb" style="margin-bottom:12px;">
+    <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:5px;">
+      <span style="font-weight:700;font-size:12.5px;color:#374151;">${esc(label)}</span>
+      <span style="font-weight:800;font-size:13px;color:${c};">${score}/100</span>
+    </div>
+    <div style="height:4px;background:#e2e8f0;border-radius:2px;margin-bottom:6px;overflow:hidden;"><div style="height:100%;width:${Math.max(0, Math.min(100, score))}%;background:${c};"></div></div>
+    ${comment ? `<p style="font-size:11.5px;line-height:1.5;color:#64748b;margin:0;">${esc(comment)}</p>` : ""}
+  </div>`;
+}
+
+function pdfHeaderHTML(title, submission, student, extraBadges) {
+  const badges = [];
+  if (docTypeBadgeLabel(submission)) badges.push(`<span style="background:rgba(255,255,255,.15);color:white;padding:4px 12px;border-radius:99px;font-size:11.5px;font-weight:600;">${esc(docTypeBadgeLabel(submission))}</span>`);
+  if (submission.chunked) badges.push(`<span style="background:rgba(255,255,255,.15);color:white;padding:4px 12px;border-radius:99px;font-size:11.5px;font-weight:600;">Full document · ${submission.chunksUsed} sections</span>`);
+  if (submission.chunksFailed > 0) badges.push(`<span style="background:#dc2626;color:white;padding:4px 12px;border-radius:99px;font-size:11.5px;font-weight:600;">${submission.chunksFailed} section${submission.chunksFailed > 1 ? "s" : ""} unreadable</span>`);
+  return `<div class="pb" style="background:linear-gradient(135deg,#1e293b,#334155);padding:26px 30px;color:white;">
+    <div style="font-size:20px;font-weight:800;margin-bottom:6px;">${esc(title)}</div>
+    <div style="font-size:13px;font-weight:700;">${esc(student.initials || "")} ${esc(student.surname || "")} · ${esc(student.number || "")} · ${esc(student.level || "")}</div>
+    <div style="font-size:11.5px;color:rgba(255,255,255,.7);margin-top:4px;">${esc(submission.filename || "Document")} · Submitted ${esc(new Date(submission.date).toLocaleDateString("en-ZA"))}${submission.submittedBy ? " · Submitted by " + esc(submission.submittedBy) : ""}</div>
+    <div style="display:flex;gap:7px;margin-top:12px;flex-wrap:wrap;">${(extraBadges || []).join("")}${badges.join("")}</div>
+  </div>`;
+}
+
+function buildStandardReportHTML(submission, student) {
   const r = submission.result;
-  if (!r) return;
-  w.h1("Assessment Report");
-  w.para(`${student.initials || ""} ${student.surname || ""}  ·  ${student.number || ""}  ·  ${student.level || ""}`, { size: 10, bold: true, color: "#0f172a", gap: 2 });
-  w.para(`${submission.filename || "Document"}  ·  Submitted ${new Date(submission.date).toLocaleDateString("en-ZA")}${submission.submittedBy ? "  ·  Submitted by " + submission.submittedBy : ""}${docTypeBadgeLabel(submission) ? "  ·  " + docTypeBadgeLabel(submission) : ""}${submission.chunked ? "  ·  Full document analysed in " + submission.chunksUsed + " sections" : ""}${submission.chunksFailed ? "  ·  Warning: " + submission.chunksFailed + " section(s) could not be read" : ""}`, { size: 9, color: "#64748b", gap: 8 });
-  w.rule();
-
-  w.h2("Overall Result");
-  w.kvLine("Score", `${r.overallScore}% (${r.overallGrade})`);
-  w.kvLine("Decision", r.supervisorDecision || "—");
-  w.spacer(4);
-  if (r.overallVerdict) w.para(r.overallVerdict, { size: 9.5, color: "#0c4a6e", gap: 10 });
-
-  if (r.positives?.length) w.bulletBlock("Strengths", r.positives, { color: "#14532d", bg: "#f0fdf4", mark: "+", titleColor: "#16a34a" });
-  if (r.criticalIssues?.length) w.bulletBlock("Critical Issues", r.criticalIssues, { color: "#7f1d1d", bg: "#fee2e2", mark: "-", titleColor: "#dc2626" });
-
-  if (r.sections?.length) {
-    w.rule();
-    w.h2("Section-by-Section Breakdown");
-    r.sections.forEach(s => {
-      w.ensure(24);
-      w.scoreRow(`${s.name}  (Grade: ${s.grade || "—"})`, s.score, null);
-      if (s.strengths?.length) w.bulletBlock("Strengths", s.strengths, { color: "#166534", mark: "+", titleColor: "#16a34a" });
-      if (s.weaknesses?.length) w.bulletBlock("Weaknesses", s.weaknesses, { color: "#7f1d1d", mark: "–", titleColor: "#dc2626" });
-      if (s.supervisorInstruction) w.para("Instruction: " + s.supervisorInstruction, { size: 9, color: "#78350f", bg: "#fffbeb", gap: 10 });
-      w.spacer(4);
-    });
-  }
-
-  if (r.priorityActions?.length) {
-    w.rule();
-    w.h2("Priority Actions");
-    r.priorityActions.forEach(a => w.para(`[${a.priority}] ${a.action}`, { size: 9.3, color: pc(a.priority), gap: 5 }));
-  }
-
-  if (r.disciplinaryAssessment || r.ecsa_ga_notes) {
-    w.rule();
-    w.h2("Disciplinary & ECSA Graduate Attributes");
-    if (r.disciplinaryAssessment) { w.h3("Disciplinary Assessment"); w.para(r.disciplinaryAssessment, { size: 9.3, gap: 10 }); }
-    if (r.ecsa_ga_notes) { w.h3("ECSA Graduate Attributes"); w.para(r.ecsa_ga_notes, { size: 9.3, gap: 4 }); }
-  }
+  if (!r) return "";
+  const scoreBadge = `<span style="background:${sb(r.overallScore)};color:${sc(r.overallScore)};padding:4px 12px;border-radius:99px;font-size:11.5px;font-weight:700;">${r.overallScore}% · ${esc(r.overallGrade)}</span>`;
+  const decBadge = `<span style="background:${dc2(r.supervisorDecision)}30;color:${dc2(r.supervisorDecision)};padding:4px 12px;border-radius:99px;font-size:11.5px;font-weight:700;">${esc(r.supervisorDecision)}</span>`;
+  return `<div style="font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;color:#0f172a;width:760px;background:white;">
+    ${pdfHeaderHTML("Assessment Report", submission, student, [scoreBadge, decBadge])}
+    <div style="padding:26px 30px;">
+      ${r.overallVerdict ? `<p class="pb" style="font-size:12.5px;line-height:1.6;color:#0c4a6e;background:#f0f9ff;border-radius:10px;padding:13px 15px;margin:0 0 16px;">${esc(r.overallVerdict)}</p>` : ""}
+      ${pdfListBlock("Strengths", r.positives, "#14532d", "#f0fdf4", "+", "#16a34a")}
+      ${pdfListBlock("Critical Issues", r.criticalIssues, "#7f1d1d", "#fee2e2", "-", "#dc2626")}
+      ${pdfSectionsBlock(r.sections)}
+      ${pdfPriorityBlock(r.priorityActions)}
+      ${pdfParaBlock("Disciplinary Assessment", r.disciplinaryAssessment)}
+      ${pdfParaBlock("ECSA Graduate Attributes", r.ecsa_ga_notes)}
+    </div>
+  </div>`;
 }
 
-function writeExtendedReport(w, submission, student) {
+function buildExtendedReportHTML(submission, student) {
   const x = submission.extendedResult;
-  if (!x) return;
-  w.newPage();
-  w.h1("Extended Editorial Review");
-  w.para(`${student.initials || ""} ${student.surname || ""}  ·  Citation style: ${x.citationReview?.declaredStyle || "—"}`, { size: 9.5, color: "#64748b", gap: 8 });
-  w.rule();
+  if (!x) return "";
+  const langBadge = x.languageReview ? `<span style="background:rgba(255,255,255,.1);color:rgba(255,255,255,.85);padding:4px 12px;border-radius:99px;font-size:11.5px;">Language: ${x.languageReview.overallLanguageScore}/100</span>` : "";
+  let html = `<div style="font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;color:#0f172a;width:760px;background:white;">
+    ${pdfHeaderHTML("Extended Editorial Review", submission, student, [langBadge])}
+    <div style="padding:26px 30px;">`;
 
   if (x.languageReview) {
-    w.h2("Language & Grammar");
-    w.scoreRow("Overall Language Score", x.languageReview.overallLanguageScore, null);
-    w.scoreRow("Readability", x.languageReview.readabilityScore, x.languageReview.readabilityComment);
-    if (x.languageReview.spellingErrors?.length) w.bulletBlock("Spelling Errors", x.languageReview.spellingErrors.map(e => `${e.original} -> ${e.correction}${e.context ? "  (\"" + e.context + "\")" : ""}`), { color: "#7f1d1d", bg: "#fee2e2", titleColor: "#dc2626" });
-    if (x.languageReview.grammarErrors?.length) w.bulletBlock("Grammar Issues", x.languageReview.grammarErrors.map(e => `${e.issue}${e.location ? "  (\"" + e.location + "\")" : ""}${e.suggestion ? "  -> " + e.suggestion : ""}`), { color: "#78350f", bg: "#fffbeb", titleColor: "#d97706" });
-    if (x.languageReview.styleIssues?.length) w.bulletBlock("Style Issues", x.languageReview.styleIssues.map(e => `${e.type}${e.location ? "  (\"" + e.location + "\")" : ""}${e.suggestion ? "  -> " + e.suggestion : ""}`), { color: "#1e3a8a", bg: "#eff6ff", titleColor: "#2563b0" });
-    w.rule();
+    const l = x.languageReview;
+    html += `<div class="pb" style="font-size:15px;font-weight:800;margin:0 0 12px;">Language &amp; Grammar</div>`;
+    html += pdfScoreLine("Overall Language Score", l.overallLanguageScore, null);
+    html += pdfScoreLine("Readability", l.readabilityScore, l.readabilityComment);
+    if (l.spellingErrors?.length) html += pdfListBlock("Spelling Errors", l.spellingErrors.map(e => `${e.original} -> ${e.correction}${e.context ? `  ("${e.context}")` : ""}`), "#7f1d1d", "#fee2e2", "-", "#dc2626");
+    if (l.grammarErrors?.length) html += pdfListBlock("Grammar Issues", l.grammarErrors.map(e => `${e.issue}${e.location ? `  ("${e.location}")` : ""}${e.suggestion ? "  -> " + e.suggestion : ""}`), "#78350f", "#fffbeb", "-", "#d97706");
+    if (l.styleIssues?.length) html += pdfListBlock("Style Issues", l.styleIssues.map(e => `${e.type}${e.location ? `  ("${e.location}")` : ""}${e.suggestion ? "  -> " + e.suggestion : ""}`), "#1e3a8a", "#eff6ff", "-", "#2563b0");
   }
 
   if (x.literatureReview) {
-    w.h2("Literature Review");
-    w.scoreRow("Funnel Approach", x.literatureReview.funnelApproachScore, x.literatureReview.funnelApproachComment);
-    w.scoreRow("Relevance", x.literatureReview.relevanceScore, x.literatureReview.relevanceComment);
-    w.scoreRow("Critical Analysis", x.literatureReview.criticalAnalysisScore, x.literatureReview.criticalAnalysisComment);
-    w.scoreRow("Flow", x.literatureReview.flowScore, x.literatureReview.flowComment);
-    if (x.literatureReview.gaps?.length) w.bulletBlock("Gaps Identified", x.literatureReview.gaps, { color: "#7f1d1d", mark: "-", titleColor: "#dc2626" });
-    if (x.literatureReview.strengths?.length) w.bulletBlock("Strengths", x.literatureReview.strengths, { color: "#14532d", mark: "+", titleColor: "#16a34a" });
-    w.rule();
+    const lr = x.literatureReview;
+    html += `<div class="pb" style="font-size:15px;font-weight:800;margin:20px 0 12px;border-top:1px solid #e2e8f0;padding-top:20px;">Literature Review</div>`;
+    html += pdfScoreLine("Funnel Approach", lr.funnelApproachScore, lr.funnelApproachComment);
+    html += pdfScoreLine("Relevance", lr.relevanceScore, lr.relevanceComment);
+    html += pdfScoreLine("Critical Analysis", lr.criticalAnalysisScore, lr.criticalAnalysisComment);
+    html += pdfScoreLine("Flow", lr.flowScore, lr.flowComment);
+    if (lr.gaps?.length) html += pdfListBlock("Gaps Identified", lr.gaps, "#7f1d1d", "#fee2e2", "-", "#dc2626");
+    if (lr.strengths?.length) html += pdfListBlock("Strengths", lr.strengths, "#14532d", "#f0fdf4", "+", "#16a34a");
   }
 
   if (x.citationReview) {
-    w.h2("Citations & References");
-    w.kvLine("Citation Score", `${x.citationReview.overallCitationScore}%`);
-    w.kvLine("Missing References", x.citationReview.missingReferences?.length || 0);
-    w.kvLine("Orphaned References", x.citationReview.orphanedReferences?.length || 0);
-    w.spacer(4);
-    if (x.citationReview.citationIssuesSummary) w.para(x.citationReview.citationIssuesSummary, { size: 9.3, color: "#0c4a6e", gap: 8 });
-    if (x.citationReview.inTextCitations?.length) w.bulletBlock("In-Text Citations", x.citationReview.inTextCitations.map(c => `${c.citation}${c.isCorrect ? " (correct)" : "  Issue: " + (c.issue || "") + (c.correction ? "  -> " + c.correction : "")}`), { color: "#334155", titleColor: "#374151" });
-    if (x.citationReview.referenceList?.length) w.bulletBlock("Reference List", x.citationReview.referenceList.map(rf => `${rf.fullReference}${rf.isCorrect ? "" : "  Issue: " + (rf.issue || "") + (rf.correction ? "  -> " + rf.correction : "")}`), { color: "#334155", titleColor: "#374151" });
-    if (x.citationReview.missingReferences?.length) w.bulletBlock("Cited but not in Reference List", x.citationReview.missingReferences, { color: "#7f1d1d", mark: "-", titleColor: "#dc2626" });
-    if (x.citationReview.orphanedReferences?.length) w.bulletBlock("In Reference List but not Cited", x.citationReview.orphanedReferences, { color: "#78350f", mark: "!", titleColor: "#d97706" });
-    w.rule();
+    const c = x.citationReview;
+    html += `<div class="pb" style="font-size:15px;font-weight:800;margin:20px 0 12px;border-top:1px solid #e2e8f0;padding-top:20px;">Citations &amp; References</div>`;
+    html += pdfScoreLine("Citation Score", c.overallCitationScore, c.citationIssuesSummary);
+    if (c.inTextCitations?.length) html += pdfListBlock("In-Text Citations", c.inTextCitations.map(ci => `${ci.citation}${ci.isCorrect ? " (correct)" : `  Issue: ${ci.issue || ""}${ci.correction ? "  -> " + ci.correction : ""}`}`), "#334155", "#f8fafc", "•", "#374151");
+    if (c.referenceList?.length) html += pdfListBlock("Reference List", c.referenceList.map(rf => `${rf.fullReference}${rf.isCorrect ? "" : `  Issue: ${rf.issue || ""}${rf.correction ? "  -> " + rf.correction : ""}`}`), "#334155", "#f8fafc", "•", "#374151");
+    if (c.missingReferences?.length) html += pdfListBlock("Cited but not in Reference List", c.missingReferences, "#7f1d1d", "#fee2e2", "-", "#dc2626");
+    if (c.orphanedReferences?.length) html += pdfListBlock("In Reference List but not Cited", c.orphanedReferences, "#78350f", "#fffbeb", "!", "#d97706");
   }
 
   if (x.aiDetection) {
-    w.h2("AI Detection");
-    w.kvLine("Estimated AI Content", `${x.aiDetection.estimatedAiPercentage}%`);
-    w.kvLine("Confidence", x.aiDetection.confidence || "—");
-    w.spacer(4);
-    if (x.aiDetection.aiComment) w.para(x.aiDetection.aiComment, { size: 9.3, gap: 8 });
-    if (x.aiDetection.aiSections?.length) w.bulletBlock("Suspected AI-Generated Sections", x.aiDetection.aiSections.map(s => `${s.section} — ${s.likelihood} likelihood${s.excerpt ? "  (\"" + s.excerpt + "…\")" : ""}`), { color: "#7f1d1d", bg: "#fee2e2", titleColor: "#dc2626" });
-    if (x.aiDetection.humanSections?.length) w.bulletBlock("Human-Written Sections", x.aiDetection.humanSections, { color: "#14532d", mark: "+", titleColor: "#16a34a" });
-    w.rule();
+    const a = x.aiDetection;
+    html += `<div class="pb" style="font-size:15px;font-weight:800;margin:20px 0 12px;border-top:1px solid #e2e8f0;padding-top:20px;">AI Detection</div>`;
+    html += pdfScoreLine("Estimated AI Content", a.estimatedAiPercentage, a.aiComment);
+    if (a.aiSections?.length) html += pdfListBlock("Suspected AI-Generated Sections", a.aiSections.map(s => `${s.section} — ${s.likelihood} likelihood${s.excerpt ? `  ("${s.excerpt}…")` : ""}`), "#7f1d1d", "#fee2e2", "-", "#dc2626");
+    if (a.humanSections?.length) html += pdfListBlock("Human-Written Sections", a.humanSections, "#14532d", "#f0fdf4", "+", "#16a34a");
   }
 
   if (x.informationFlow) {
-    w.h2("Information Flow");
-    w.scoreRow("Overall Flow", x.informationFlow.overallFlowScore, x.informationFlow.logicalProgressionComment);
-    w.kvLine("Transition Quality", x.informationFlow.transitionQuality || "—");
-    w.spacer(4);
-    if (x.informationFlow.sectionFlow?.length) w.bulletBlock("Section-by-Section Flow", x.informationFlow.sectionFlow.map(s => `${s.section} — ${s.flowScore}/100: ${s.comment}${s.issue ? "  Issue: " + s.issue : ""}`), { color: "#334155", titleColor: "#374151" });
-    if (x.informationFlow.recommendations?.length) w.bulletBlock("Recommendations", x.informationFlow.recommendations, { color: "#1e40af", mark: "-", titleColor: "#374151" });
-    w.rule();
+    const f = x.informationFlow;
+    html += `<div class="pb" style="font-size:15px;font-weight:800;margin:20px 0 12px;border-top:1px solid #e2e8f0;padding-top:20px;">Information Flow</div>`;
+    html += pdfScoreLine("Overall Flow", f.overallFlowScore, f.logicalProgressionComment);
+    if (f.sectionFlow?.length) html += pdfListBlock("Section-by-Section Flow", f.sectionFlow.map(s => `${s.section} — ${s.flowScore}/100: ${s.comment}${s.issue ? "  Issue: " + s.issue : ""}`), "#334155", "#f8fafc", "•", "#374151");
+    if (f.recommendations?.length) html += pdfListBlock("Recommendations", f.recommendations, "#1e40af", "#eff6ff", "-", "#374151");
   }
 
-  if (x.editorialSummary || x.priorityCorrections?.length) {
-    w.h2("Summary");
-    if (x.editorialSummary) w.para(x.editorialSummary, { size: 9.5, color: "#0c4a6e", gap: 10 });
-    if (x.priorityCorrections?.length) w.bulletBlock("Priority Corrections", x.priorityCorrections.map(c => `[${c.priority}/${c.type}] ${c.action}`), { color: "#334155", titleColor: "#374151" });
+  html += pdfParaBlock("Editorial Summary", x.editorialSummary);
+  if (x.priorityCorrections?.length) html += pdfListBlock("Priority Corrections", x.priorityCorrections.map(c => `[${c.priority}/${c.type}] ${c.action}`), "#334155", "#f8fafc", "•", "#374151");
+
+  html += `</div></div>`;
+  return html;
+}
+
+// Renders `html` into a hidden off-screen container, then rasterizes it and slices the
+// result into A4-page-sized images, choosing slice boundaries at the gaps BETWEEN
+// ".pb" blocks (never through the middle of one) so no line of text is ever cut.
+async function renderHtmlToPdfPages(doc, html, isFirstSection) {
+  const html2canvas = (await import("html2canvas")).default;
+  const container = document.createElement("div");
+  container.style.position = "fixed";
+  container.style.left = "-9999px";
+  container.style.top = "0";
+  container.style.width = "760px";
+  container.style.background = "#ffffff";
+  container.innerHTML = html;
+  document.body.appendChild(container);
+  await new Promise(res => setTimeout(res, 30));
+
+  const canvas = await html2canvas(container, { scale: 2, backgroundColor: "#ffffff", windowWidth: 760, useCORS: true });
+
+  const blocks = Array.from(container.querySelectorAll(".pb"));
+  const containerTop = container.getBoundingClientRect().top;
+  const scale = canvas.height / container.offsetHeight;
+  const blockEdgesPx = blocks.map(b => {
+    const rect = b.getBoundingClientRect();
+    return { top: (rect.top - containerTop) * scale, bottom: (rect.bottom - containerTop) * scale };
+  });
+  document.body.removeChild(container);
+
+  const pageW = doc.internal.pageSize.getWidth();
+  const pageH = doc.internal.pageSize.getHeight();
+  const imgFullH = (canvas.height * pageW) / canvas.width;
+  const pxPerPt = canvas.height / imgFullH;
+  const pageHeightPx = pageH * pxPerPt;
+
+  let y = 0;
+  let first = true;
+  while (y < canvas.height - 1) {
+    let limit = Math.min(y + pageHeightPx, canvas.height);
+    // Snap the break to the end of the last block that fits, so we never cut one in half.
+    if (limit < canvas.height) {
+      const candidates = blockEdgesPx.filter(e => e.bottom > y && e.bottom <= limit);
+      if (candidates.length) limit = candidates[candidates.length - 1].bottom;
+      else {
+        // No block fully fits (a single block is taller than a page) — fall back to the raw limit.
+      }
+    }
+    const sliceH = Math.max(1, Math.round(limit - y));
+    const pageCanvas = document.createElement("canvas");
+    pageCanvas.width = canvas.width;
+    pageCanvas.height = sliceH;
+    const ctx = pageCanvas.getContext("2d");
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(0, 0, pageCanvas.width, pageCanvas.height);
+    ctx.drawImage(canvas, 0, y, canvas.width, sliceH, 0, 0, canvas.width, sliceH);
+    const imgData = pageCanvas.toDataURL("image/jpeg", 0.92);
+    if (!(first && isFirstSection)) doc.addPage();
+    doc.addImage(imgData, "JPEG", 0, 0, pageW, (sliceH * pageW) / canvas.width);
+    y = limit;
+    first = false;
   }
 }
 
-function generateReportPDF(submission, student) {
+async function generateReportPDF(submission, student) {
   const doc = new jsPDF({ unit: "pt", format: "a4" });
-  const w = makePdfWriter(doc);
-  writeStandardReport(w, submission, student || {});
-  if (submission.extendedResult) writeExtendedReport(w, submission, student || {});
-  w.footer();
+  const stu = student || {};
+  await renderHtmlToPdfPages(doc, buildStandardReportHTML(submission, stu), true);
+  if (submission.extendedResult) await renderHtmlToPdfPages(doc, buildExtendedReportHTML(submission, stu), false);
+
+  const pages = doc.internal.getNumberOfPages();
+  for (let i = 1; i <= pages; i++) {
+    doc.setPage(i);
+    doc.setTextColor(148, 163, 184);
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(8);
+    const pageW = doc.internal.pageSize.getWidth();
+    const pageH = doc.internal.pageSize.getHeight();
+    doc.text("AcademiQ Analyser — Generated report, for supervisory use", 40, pageH - 20);
+    doc.text(`Page ${i} of ${pages}`, pageW - 40, pageH - 20, { align: "right" });
+  }
+
   const safeName = `${(student?.surname || "student").replace(/[^a-z0-9]/gi, "_")}_${(submission.filename || "report").replace(/\.[^/.]+$/, "").replace(/[^a-z0-9]/gi, "_")}`;
   doc.save(`${safeName}_AcademiQ_Report.pdf`);
+}
+
+// Shared download button with loading/error feedback — used everywhere a PDF can be downloaded.
+function PdfDownloadButton({submission,student,variant="icon"}){
+  const[busy,setBusy]=useState(false);
+  const[err,setErr]=useState(false);
+  const run=async()=>{
+    setBusy(true);setErr(false);
+    try{ await generateReportPDF(submission,student); }
+    catch(e){ console.error(e); setErr(true); setTimeout(()=>setErr(false),4000); }
+    setBusy(false);
+  };
+  if(variant==="header")return(
+    <button onClick={run} disabled={busy} title={err?"PDF generation failed — try again":"Download PDF"} style={{background:err?"#dc2626":"rgba(255,255,255,.1)",border:"none",borderRadius:7,padding:"0 10px",height:28,cursor:busy?"default":"pointer",display:"flex",alignItems:"center",gap:5,color:"white",fontSize:11,fontWeight:600,opacity:busy?.7:1}}>
+      <Ic n={err?"x":"download"} size={13} c="white"/> {busy?"Generating…":err?"Failed":"PDF"}
+    </button>
+  );
+  return(
+    <button onClick={run} disabled={busy} title={err?"PDF generation failed — try again":"Download PDF"} style={{background:"none",border:"none",cursor:busy?"default":"pointer",color:err?"#dc2626":"#64748b",opacity:busy?.5:1}}>
+      <Ic n={err?"x":"download"} size={14}/>
+    </button>
+  );
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -1374,7 +1415,7 @@ function ExtendedFeedbackModal({submission,students,onClose}){
             </div>
           </div>
           <div style={{display:"flex",gap:6,flexShrink:0}}>
-            <button onClick={()=>generateReportPDF(submission,st)} title="Download PDF" style={{background:"rgba(255,255,255,.1)",border:"none",borderRadius:7,padding:"0 10px",height:28,cursor:"pointer",display:"flex",alignItems:"center",gap:5,color:"white",fontSize:11,fontWeight:600}}><Ic n="download" size={13} c="white"/> PDF</button>
+            <PdfDownloadButton submission={submission} student={st} variant="header"/>
             <button onClick={onClose} style={{background:"rgba(255,255,255,.1)",border:"none",borderRadius:7,width:28,height:28,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center"}}><Ic n="x" size={14} c="white"/></button>
           </div>
         </div>
@@ -1798,7 +1839,7 @@ function FeedbackModal({submission,students,onClose}){
             </div>
           </div>
           <div style={{display:"flex",gap:6,flexShrink:0}}>
-            <button onClick={()=>generateReportPDF(submission,st)} title="Download PDF" style={{background:"rgba(255,255,255,.1)",border:"none",borderRadius:7,padding:"0 10px",height:28,cursor:"pointer",display:"flex",alignItems:"center",gap:5,color:"white",fontSize:11,fontWeight:600}}><Ic n="download" size={13} c="white"/> PDF</button>
+            <PdfDownloadButton submission={submission} student={st} variant="header"/>
             <button onClick={onClose} style={{background:"rgba(255,255,255,.1)",border:"none",borderRadius:7,width:28,height:28,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center"}}><Ic n="x" size={14} c="white"/></button>
           </div>
         </div>
@@ -1872,7 +1913,7 @@ function RecentReports({db,submissions,students}){
     {label:"Date",     render:r=><span style={{color:"#94a3b8",fontSize:12}}>{new Date(r.date).toLocaleDateString("en-ZA")}</span>},
     {label:"",         render:r=><div style={{display:"flex",gap:6}}>
       <button onClick={()=>setView(r)} style={{background:"none",border:"none",cursor:"pointer",color:"#3b82f6"}}><Ic n="eye" size={14}/></button>
-      <button onClick={()=>generateReportPDF(r,getStu(r.studentId))} title="Download PDF" style={{background:"none",border:"none",cursor:"pointer",color:"#64748b"}}><Ic n="download" size={14}/></button>
+      <PdfDownloadButton submission={r} student={getStu(r.studentId)}/>
     </div>},
   ];
   return(
@@ -2082,7 +2123,7 @@ function AllReportsTab({db}){
     {label:"Score",     render:r=><span style={{fontWeight:800,color:sc(r.result?.overallScore||0)}}>{r.result?.overallScore??"-"}%</span>},
     {label:"Decision",  render:r=>r.result?.supervisorDecision?<Pill label={r.result.supervisorDecision} bg={sb(r.result.overallScore||0)} color={dc2(r.result.supervisorDecision)}/>:"-"},
     {label:"Date",      render:r=><span style={{color:"#94a3b8",fontSize:12}}>{new Date(r.date).toLocaleDateString("en-ZA")}</span>},
-    {label:"",          render:r=><div style={{display:"flex",gap:5}}><button onClick={()=>setView(r)} style={{background:"none",border:"none",cursor:"pointer",color:"#3b82f6"}}><Ic n="eye" size={14}/></button>{r.extendedResult&&<button onClick={()=>setViewExt(r)} style={{background:"#ede9fe",border:"none",borderRadius:6,padding:"3px 7px",cursor:"pointer",color:"#4f46e5",fontSize:11,fontWeight:600}}>Ext</button>}<button onClick={()=>generateReportPDF(r,getStu(r.studentId))} title="Download PDF" style={{background:"none",border:"none",cursor:"pointer",color:"#64748b"}}><Ic n="download" size={14}/></button></div>},
+    {label:"",          render:r=><div style={{display:"flex",gap:5}}><button onClick={()=>setView(r)} style={{background:"none",border:"none",cursor:"pointer",color:"#3b82f6"}}><Ic n="eye" size={14}/></button>{r.extendedResult&&<button onClick={()=>setViewExt(r)} style={{background:"#ede9fe",border:"none",borderRadius:6,padding:"3px 7px",cursor:"pointer",color:"#4f46e5",fontSize:11,fontWeight:600}}>Ext</button>}<PdfDownloadButton submission={r} student={getStu(r.studentId)}/></div>},
   ];
   const[viewExt,setViewExt]=useState(null);
   return(
@@ -2376,7 +2417,7 @@ function SupReports({db,myStudents,mySubs}){
     {label:"Score",   render:r=><span style={{fontWeight:800,color:sc(r.result?.overallScore||0)}}>{r.result?.overallScore??"-"}%</span>},
     {label:"Decision",render:r=>r.result?.supervisorDecision?<Pill label={r.result.supervisorDecision} bg={sb(r.result.overallScore||0)} color={dc2(r.result.supervisorDecision)}/>:"-"},
     {label:"Date",    render:r=><span style={{color:"#94a3b8",fontSize:12}}>{new Date(r.date).toLocaleDateString("en-ZA")}</span>},
-    {label:"",        render:r=><div style={{display:"flex",gap:5}}><button onClick={()=>setView(r)} style={{background:"none",border:"none",cursor:"pointer",color:"#3b82f6"}}><Ic n="eye" size={14}/></button>{r.extendedResult&&<button onClick={()=>setViewExt(r)} style={{background:"#ede9fe",border:"none",borderRadius:6,padding:"3px 7px",cursor:"pointer",color:"#4f46e5",fontSize:11,fontWeight:600}}>Ext</button>}<button onClick={()=>generateReportPDF(r,getStu(r.studentId))} title="Download PDF" style={{background:"none",border:"none",cursor:"pointer",color:"#64748b"}}><Ic n="download" size={14}/></button></div>},
+    {label:"",        render:r=><div style={{display:"flex",gap:5}}><button onClick={()=>setView(r)} style={{background:"none",border:"none",cursor:"pointer",color:"#3b82f6"}}><Ic n="eye" size={14}/></button>{r.extendedResult&&<button onClick={()=>setViewExt(r)} style={{background:"#ede9fe",border:"none",borderRadius:6,padding:"3px 7px",cursor:"pointer",color:"#4f46e5",fontSize:11,fontWeight:600}}>Ext</button>}<PdfDownloadButton submission={r} student={getStu(r.studentId)}/></div>},
   ];
   return(
     <><PageHeader title="Student Reports"/>
