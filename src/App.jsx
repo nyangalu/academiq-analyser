@@ -518,6 +518,7 @@ export default function App() {
   const [supervisors,setSupervisors,supervisorsReady] = useFirebase("supervisors");
   const [students,   setStudents,   studentsReady]   = useFirebase("students");
   const [submissions,setSubmissions,submissionsReady]= useFirebase("submissions");
+  const [institutionBranding,setInstitutionBranding,brandingReady]= useFirebase("institutionBranding");
   const [session,    setSession]    = useState(null);
   const [toast,      setToast]      = useState(null);
   const [seeded,     setSeeded]     = useState(false);
@@ -532,7 +533,7 @@ export default function App() {
     }
   }, [adminsReady, seeded]);
 
-  const db = { admins, setAdmins, supervisors, setSupervisors, students, setStudents, submissions, setSubmissions };
+  const db = { admins, setAdmins, supervisors, setSupervisors, students, setStudents, submissions, setSubmissions, institutionBranding, setInstitutionBranding };
   const logout = () => setSession(null);
 
   if (!ready) return (
@@ -597,6 +598,7 @@ function Ic({n,size=18,c="currentColor"}){
     unlink:`<path d="M18.84 12.25l1.72-1.71a5.004 5.004 0 0 0-.12-7.07 5.006 5.006 0 0 0-6.95 0l-1.72 1.71"/><path d="M13.41 18.41l-1.72 1.71a5.004 5.004 0 0 1-7.07 0 4.996 4.996 0 0 1 0-7.07l1.71-1.71"/><line x1="8" y1="2" x2="8" y2="5"/><line x1="2" y1="8" x2="5" y2="8"/><line x1="16" y1="19" x2="16" y2="22"/><line x1="19" y1="16" x2="22" y2="16"/>`,
     bell:`<path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/>`,
     download:`<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>`,
+    building:`<rect x="4" y="2" width="16" height="20" rx="1"/><line x1="9" y1="6" x2="9" y2="6.01"/><line x1="15" y1="6" x2="15" y2="6.01"/><line x1="9" y1="10" x2="9" y2="10.01"/><line x1="15" y1="10" x2="15" y2="10.01"/><line x1="9" y1="14" x2="9" y2="14.01"/><line x1="15" y1="14" x2="15" y2="14.01"/><line x1="9" y1="18" x2="15" y2="18"/>`,
   };
   return React.createElement("svg",{width:size,height:size,viewBox:"0 0 24 24",fill:"none",stroke:c,strokeWidth:"2",strokeLinecap:"round",strokeLinejoin:"round",dangerouslySetInnerHTML:{__html:paths[n]||""}});
 }
@@ -910,6 +912,8 @@ function Modal({title,onClose,children,maxW=620}){
 function StudentFormModal({db,existing,supervisorId,onClose,showToast}){
   const isNew=!existing;
   const[f,setF]=useState({surname:existing?.surname||"",initials:existing?.initials||"",number:existing?.number||"",institution:existing?.institution||"",level:existing?.level||"BEng",fields:existing?.fields||[],strictness:existing?.strictness||"strict",rubric:existing?.rubric||"",extraPrompt:existing?.extraPrompt||"",password:existing?.password||"",securityQ:existing?.securityQ||null,supervisorId:existing?.supervisorId||supervisorId||null,coSupervisorIds:existing?.coSupervisorIds||[]});
+  const knownInstitution=SA_UNIVERSITIES.some(u=>u.name===existing?.institution);
+  const[customInst,setCustomInst]=useState(existing?.institution&&!knownInstitution);
   const[sqQ,setSqQ]=useState(existing?.securityQ?.question||SECURITY_QUESTIONS[0]);
   const[sqA,setSqA]=useState("");
   const[err,setErr]=useState("");
@@ -938,7 +942,21 @@ function StudentFormModal({db,existing,supervisorId,onClose,showToast}){
         <div><label style={LS}>Initials *</label><input value={f.initials} onChange={up("initials")} placeholder="DA" style={IS}/></div>
         <div><label style={LS}>Student Number *</label><input value={f.number} onChange={up("number")} placeholder="38045869" disabled={!isNew} style={{...IS,background:!isNew?"#f8fafc":"white"}}/></div>
         <div><label style={LS}>Level *</label><select value={f.level} onChange={up("level")} style={IS}>{LEVELS.map(l=><option key={l}>{l}</option>)}</select></div>
-        <div style={{gridColumn:"1 / -1"}}><label style={LS}>Institution *</label><input value={f.institution} onChange={up("institution")} placeholder="e.g. Cape Peninsula University of Technology" style={IS}/></div>
+        <div style={{gridColumn:"1 / -1"}}>
+          <label style={LS}>Institution *</label>
+          {!customInst?(
+            <select value={SA_UNIVERSITIES.some(u=>u.name===f.institution)?f.institution:""} onChange={e=>{ if(e.target.value==="__other__"){setCustomInst(true);setF(p=>({...p,institution:""}));} else setF(p=>({...p,institution:e.target.value})); }} style={IS}>
+              <option value="" disabled>Select university…</option>
+              {SA_UNIVERSITIES.map(u=><option key={u.name} value={u.name}>{u.name}</option>)}
+              <option value="__other__">Other / not listed…</option>
+            </select>
+          ):(
+            <div style={{display:"flex",gap:6}}>
+              <input value={f.institution} onChange={up("institution")} placeholder="Institution name" style={IS} autoFocus/>
+              <button type="button" onClick={()=>{setCustomInst(false);setF(p=>({...p,institution:""}));}} style={{background:"#f1f5f9",border:"none",borderRadius:9,padding:"0 12px",cursor:"pointer",color:"#64748b",fontSize:12,whiteSpace:"nowrap"}}>Choose from list</button>
+            </div>
+          )}
+        </div>
       </div>
       <div style={{marginBottom:11}}>
         <label style={LS}>Assign to Supervisor</label>
@@ -1103,14 +1121,24 @@ function printScoreLine(label, score, comment) {
   </div>`;
 }
 
-function printHeaderHTML(title, subtitle, submission, student) {
+function printHeaderHTML(title, subtitle, submission, student, branding) {
   const badges = [];
   if (docTypeBadgeLabel(submission)) badges.push(esc(docTypeBadgeLabel(submission)));
   if (submission.chunked) badges.push(`Full document · ${submission.chunksUsed} sections`);
   if (submission.chunksFailed > 0) badges.push(`⚠ ${submission.chunksFailed} section(s) unreadable`);
+  const instMark = student.institution ? (
+    branding?.logoUrl
+      ? `<img src="${esc(branding.logoUrl)}" alt="" style="height:34px;max-width:110px;object-fit:contain;background:white;border-radius:6px;padding:3px;"/>`
+      : `<div style="width:34px;height:34px;border-radius:8px;background:${branding?.color || "#334155"};color:white;display:flex;align-items:center;justify-content:center;font-weight:800;font-size:11px;flex-shrink:0;">${esc((student.institution.match(/\b[A-Z]/g) || []).join("").slice(0, 4) || student.institution.slice(0,3).toUpperCase())}</div>`
+  ) : "";
   return `<div class="header">
-    <h1>${esc(title)}</h1>
-    <div class="header-sub">${esc(subtitle)}</div>
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:14px;">
+      <div>
+        <h1>${esc(title)}</h1>
+        <div class="header-sub">${esc(subtitle)}</div>
+      </div>
+      ${instMark ? `<div style="text-align:right;flex-shrink:0;">${instMark}<div style="font-size:9.5px;color:rgba(255,255,255,.6);margin-top:4px;max-width:120px;">${esc(student.institution)}</div></div>` : ""}
+    </div>
     <div class="header-grid">
       <div><span class="hlabel">Student</span><br/>${esc(student.initials || "")} ${esc(student.surname || "")}</div>
       <div><span class="hlabel">Student No.</span><br/>${esc(student.number || "")}</div>
@@ -1121,10 +1149,10 @@ function printHeaderHTML(title, subtitle, submission, student) {
   </div>`;
 }
 
-function buildStandardReportSection(submission, student) {
+function buildStandardReportSection(submission, student, branding) {
   const r = submission.result;
   if (!r) return "";
-  return `${printHeaderHTML("Assessment Report", "AcademiQ Analyser — Supervisor Assessment", submission, student)}
+  return `${printHeaderHTML("Assessment Report", "AcademiQ Analyser — Supervisor Assessment", submission, student, branding)}
     <div class="badges">
       <span class="badge" style="background:${sb(r.overallScore)};color:${sc(r.overallScore)};">${r.overallScore}% · ${esc(r.overallGrade)}</span>
       <span class="badge" style="background:${dc2(r.supervisorDecision)}22;color:${dc2(r.supervisorDecision)};">${esc(r.supervisorDecision)}</span>
@@ -1138,10 +1166,10 @@ function buildStandardReportSection(submission, student) {
     ${printParaBlock("ECSA Graduate Attributes", r.ecsa_ga_notes)}`;
 }
 
-function buildExtendedReportSection(submission, student) {
+function buildExtendedReportSection(submission, student, branding) {
   const x = submission.extendedResult;
   if (!x) return "";
-  let html = `<div class="page-break"></div>${printHeaderHTML("Extended Editorial Review", "AcademiQ Analyser — Language, Literature, Citations, AI Detection & Flow", submission, student)}`;
+  let html = `<div class="page-break"></div>${printHeaderHTML("Extended Editorial Review", "AcademiQ Analyser — Language, Literature, Citations, AI Detection & Flow", submission, student, branding)}`;
 
   if (x.languageReview) {
     const l = x.languageReview;
@@ -1196,10 +1224,10 @@ function buildExtendedReportSection(submission, student) {
   return html;
 }
 
-function buildPrintDocument(submission, student) {
+function buildPrintDocument(submission, student, branding) {
   const stu = student || {};
   const title = `${stu.surname || "Report"} — AcademiQ Assessment`;
-  const body = buildStandardReportSection(submission, stu) + (submission.extendedResult ? buildExtendedReportSection(submission, stu) : "");
+  const body = buildStandardReportSection(submission, stu, branding) + (submission.extendedResult ? buildExtendedReportSection(submission, stu, branding) : "");
   return `<!DOCTYPE html>
 <html>
 <head>
@@ -1255,8 +1283,9 @@ function buildPrintDocument(submission, student) {
 </html>`;
 }
 
-function printReport(submission, student) {
-  const html = buildPrintDocument(submission, student);
+function printReport(submission, student, db) {
+  const branding = student?.institution ? getInstitutionBranding(db, student.institution) : null;
+  const html = buildPrintDocument(submission, student, branding);
   const win = window.open("", "_blank", "width=900,height=1000");
   if (!win) { alert("Your browser blocked the print window. Please allow pop-ups for this site and try again."); return; }
   win.document.open();
@@ -1268,8 +1297,8 @@ function printReport(submission, student) {
 }
 
 // Shared print/download button — used everywhere a PDF report can be generated.
-function PdfDownloadButton({submission,student,variant="icon"}){
-  const run=()=>printReport(submission,student);
+function PdfDownloadButton({submission,student,db,variant="icon"}){
+  const run=()=>printReport(submission,student,db);
   if(variant==="header")return(
     <button onClick={run} title="Print / Save as PDF" style={{background:"rgba(255,255,255,.1)",border:"none",borderRadius:7,padding:"0 10px",height:28,cursor:"pointer",display:"flex",alignItems:"center",gap:5,color:"white",fontSize:11,fontWeight:600}}>
       <Ic n="download" size={13} c="white"/> PDF
@@ -1285,6 +1314,56 @@ function PdfDownloadButton({submission,student,variant="icon"}){
 // ═══════════════════════════════════════════════════════════════════════
 // CITATION STYLES
 // ═══════════════════════════════════════════════════════════════════════
+
+// ═══════════════════════════════════════════════════════════════════════
+// SOUTH AFRICAN UNIVERSITIES + INSTITUTION BRANDING
+// ═══════════════════════════════════════════════════════════════════════
+
+// All 26 accredited public universities in South Africa (DHET-recognised).
+// Names/abbreviations only — factual data, not trademarked creative content.
+const SA_UNIVERSITIES = [
+  {name:"University of Cape Town", abbr:"UCT"},
+  {name:"Stellenbosch University", abbr:"SU"},
+  {name:"University of the Western Cape", abbr:"UWC"},
+  {name:"University of Pretoria", abbr:"UP"},
+  {name:"University of the Witwatersrand", abbr:"Wits"},
+  {name:"Rhodes University", abbr:"RU"},
+  {name:"University of the Free State", abbr:"UFS"},
+  {name:"University of KwaZulu-Natal", abbr:"UKZN"},
+  {name:"North-West University", abbr:"NWU"},
+  {name:"University of Fort Hare", abbr:"UFH"},
+  {name:"University of Limpopo", abbr:"UL"},
+  {name:"University of Johannesburg", abbr:"UJ"},
+  {name:"Nelson Mandela University", abbr:"NMU"},
+  {name:"University of South Africa", abbr:"UNISA"},
+  {name:"University of Venda", abbr:"UNIVEN"},
+  {name:"University of Zululand", abbr:"UNIZULU"},
+  {name:"Walter Sisulu University", abbr:"WSU"},
+  {name:"Cape Peninsula University of Technology", abbr:"CPUT"},
+  {name:"Central University of Technology", abbr:"CUT"},
+  {name:"Durban University of Technology", abbr:"DUT"},
+  {name:"Mangosuthu University of Technology", abbr:"MUT"},
+  {name:"Tshwane University of Technology", abbr:"TUT"},
+  {name:"Vaal University of Technology", abbr:"VUT"},
+  {name:"Sol Plaatje University", abbr:"SPU"},
+  {name:"University of Mpumalanga", abbr:"UMP"},
+  {name:"Sefako Makgatho Health Sciences University", abbr:"SMU"},
+];
+
+// Deterministic fallback colour for an institution with no configured branding —
+// gives visual variety without claiming to be anyone's "official" colour.
+const FALLBACK_PALETTE = ["#1e3a8a","#7c2d12","#14532d","#581c87","#0c4a6e","#78350f","#831843","#164e63"];
+function fallbackInstitutionColor(name) {
+  let hash = 0;
+  for (let i = 0; i < (name || "").length; i++) hash = (hash * 31 + name.charCodeAt(i)) >>> 0;
+  return FALLBACK_PALETTE[hash % FALLBACK_PALETTE.length];
+}
+// Looks up admin-configured branding for an institution, falling back to a
+// deterministic colour + no logo if the admin hasn't set anything up for it.
+function getInstitutionBranding(db, institutionName) {
+  const cfg = db?.institutionBranding?.find(b => b.id === institutionName);
+  return { color: cfg?.color || fallbackInstitutionColor(institutionName || ""), logoUrl: cfg?.logoUrl || "" };
+}
 
 const CITATION_STYLES = [
   {id:"apa",    label:"APA 7th Edition"},
@@ -1362,7 +1441,7 @@ function DocTypeSelector({docType,setDocType,chapters,setChapters,chapterByChapt
 // EXTENDED FEEDBACK MODAL
 // ═══════════════════════════════════════════════════════════════════════
 
-function ExtendedFeedbackModal({submission,students,onClose}){
+function ExtendedFeedbackModal({submission,students,db,onClose}){
   const[tab,setTab]=useState("language");
   const r=submission.extendedResult;
   const st=students.find(s=>s.id===submission.studentId)||{};
@@ -1401,7 +1480,7 @@ function ExtendedFeedbackModal({submission,students,onClose}){
             </div>
           </div>
           <div style={{display:"flex",gap:6,flexShrink:0}}>
-            <PdfDownloadButton submission={submission} student={st} variant="header"/>
+            <PdfDownloadButton submission={submission} student={st} db={db} variant="header"/>
             <button onClick={onClose} style={{background:"rgba(255,255,255,.1)",border:"none",borderRadius:7,width:28,height:28,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center"}}><Ic n="x" size={14} c="white"/></button>
           </div>
         </div>
@@ -1803,7 +1882,7 @@ function SupSubmitModal({db,student,onClose,showToast,actor}){
 // FEEDBACK MODAL
 // ═══════════════════════════════════════════════════════════
 
-function FeedbackModal({submission,students,onClose}){
+function FeedbackModal({submission,students,db,onClose}){
   const[tab,setTab]=useState("overview");
   const r=submission.result;
   const st=students.find(s=>s.id===submission.studentId)||{};
@@ -1825,7 +1904,7 @@ function FeedbackModal({submission,students,onClose}){
             </div>
           </div>
           <div style={{display:"flex",gap:6,flexShrink:0}}>
-            <PdfDownloadButton submission={submission} student={st} variant="header"/>
+            <PdfDownloadButton submission={submission} student={st} db={db} variant="header"/>
             <button onClick={onClose} style={{background:"rgba(255,255,255,.1)",border:"none",borderRadius:7,width:28,height:28,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center"}}><Ic n="x" size={14} c="white"/></button>
           </div>
         </div>
@@ -1899,7 +1978,7 @@ function RecentReports({db,submissions,students}){
     {label:"Date",     render:r=><span style={{color:"#94a3b8",fontSize:12}}>{new Date(r.date).toLocaleDateString("en-ZA")}</span>},
     {label:"",         render:r=><div style={{display:"flex",gap:6}}>
       <button onClick={()=>setView(r)} style={{background:"none",border:"none",cursor:"pointer",color:"#3b82f6"}}><Ic n="eye" size={14}/></button>
-      <PdfDownloadButton submission={r} student={getStu(r.studentId)}/>
+      <PdfDownloadButton submission={r} student={getStu(r.studentId)} db={db}/>
     </div>},
   ];
   return(
@@ -1908,7 +1987,7 @@ function RecentReports({db,submissions,students}){
         <div style={{padding:".75rem 1.1rem",borderBottom:"1px solid #f1f5f9"}}><h3 style={{margin:0,fontSize:13,fontWeight:700}}>Recent Reports</h3></div>
         <DataTable cols={cols} rows={rows} empty="No reports yet."/>
       </div>
-      {view&&<FeedbackModal submission={view} students={students} onClose={()=>setView(null)}/>}
+      {view&&<FeedbackModal submission={view} students={students} db={db} onClose={()=>setView(null)}/>}
     </>
   );
 }
@@ -1926,6 +2005,7 @@ function AdminPortal({db,session,onLogout,showToast}){
     {id:"admins",      icon:"shield",  label:"Admins"},
     {id:"supervisors", icon:"users",   label:"Supervisors"},
     {id:"students",    icon:"user",    label:"Students"},
+    {id:"institutions",icon:"building",label:"Institutions"},
     {id:"reports",     icon:"file",    label:"All Reports"},
     {id:"allocate",    icon:"link2",   label:"Allocations"},
     {id:"settings",    icon:"settings",label:"My Settings"},
@@ -1936,6 +2016,7 @@ function AdminPortal({db,session,onLogout,showToast}){
       {view==="admins"      && <AdminsTab        db={db} session={session} showToast={showToast}/>}
       {view==="supervisors" && <SupervisorsTab   db={db} showToast={showToast}/>}
       {view==="students"    && <AdminStudentsTab db={db} session={session} showToast={showToast}/>}
+      {view==="institutions"&& <InstitutionsTab  db={db} showToast={showToast}/>}
       {view==="reports"     && <AllReportsTab    db={db}/>}
       {view==="allocate"    && <AllocateTab      db={db} showToast={showToast}/>}
       {view==="settings"    && <AccountSettings  role="admin" db={db} session={session} showToast={showToast}/>}
@@ -2096,6 +2177,96 @@ function AdminStudentsTab({db,session,showToast}){
   );
 }
 
+// ═══════════════════════════════════════════════════════════
+// INSTITUTION BRANDING — logo + accent colour used on report letterheads.
+// Not sourced/guessed by AcademiQ: since university names, logos and colour
+// schemes are registered trademarks, the admin (who has legitimate access to
+// their own institution's official assets) sets these directly rather than
+// the app fabricating "official" branding it can't verify.
+// ═══════════════════════════════════════════════════════════
+
+function InstitutionEditModal({db,institution,onClose,showToast}){
+  const existing=db.institutionBranding.find(b=>b.id===institution.name);
+  const[color,setColor]=useState(existing?.color||fallbackInstitutionColor(institution.name));
+  const[logoUrl,setLogoUrl]=useState(existing?.logoUrl||"");
+  const save=()=>{
+    db.setInstitutionBranding(prev=>{
+      const rest=prev.filter(b=>b.id!==institution.name);
+      return [...rest,{id:institution.name,color,logoUrl:logoUrl.trim()}];
+    });
+    showToast(`${institution.abbr} branding saved.`);
+    onClose();
+  };
+  const reset=()=>{
+    db.setInstitutionBranding(prev=>prev.filter(b=>b.id!==institution.name));
+    showToast(`${institution.abbr} branding reset to default.`);
+    onClose();
+  };
+  return(
+    <Modal title={`Branding — ${institution.name}`} onClose={onClose} maxW={480}>
+      <div style={{marginBottom:14}}>
+        <label style={LS}>Accent Colour</label>
+        <div style={{display:"flex",gap:8,alignItems:"center"}}>
+          <input type="color" value={color} onChange={e=>setColor(e.target.value)} style={{width:44,height:38,border:"1.5px solid #e2e8f0",borderRadius:8,padding:2,cursor:"pointer"}}/>
+          <input value={color} onChange={e=>setColor(e.target.value)} style={IS}/>
+        </div>
+      </div>
+      <div style={{marginBottom:14}}>
+        <label style={LS}>Logo URL (optional)</label>
+        <input value={logoUrl} onChange={e=>setLogoUrl(e.target.value)} placeholder="https://www.example.ac.za/logo.png" style={IS}/>
+        <p style={{fontSize:11.5,color:"#94a3b8",marginTop:5,lineHeight:1.5}}>Use a direct link to the institution's own official logo image, hosted on a page you have the rights to use — e.g. their public website or your own storage. Leave blank to use a plain monogram in the accent colour instead.</p>
+      </div>
+      <div style={{background:"#f8fafc",borderRadius:9,padding:12,marginBottom:16}}>
+        <label style={{...LS,marginBottom:8}}>Preview</label>
+        <div style={{display:"flex",alignItems:"center",gap:10,background:"white",border:"1px solid #e2e8f0",borderRadius:9,padding:10}}>
+          {logoUrl?<img src={logoUrl} alt="" style={{height:36,maxWidth:100,objectFit:"contain"}} onError={e=>{e.target.style.display="none";}}/>
+            :<div style={{width:36,height:36,borderRadius:8,background:color,color:"white",display:"flex",alignItems:"center",justifyContent:"center",fontWeight:800,fontSize:12}}>{institution.abbr.slice(0,4)}</div>}
+          <div style={{fontWeight:700,fontSize:13}}>{institution.name}</div>
+        </div>
+      </div>
+      <div style={{display:"flex",gap:8}}>
+        <button onClick={save} style={{...BP,flex:1}}>Save Branding</button>
+        {existing&&<button onClick={reset} style={{background:"#fee2e2",border:"none",borderRadius:9,padding:"10px 16px",color:"#dc2626",fontWeight:700,fontSize:13,cursor:"pointer"}}>Reset</button>}
+      </div>
+    </Modal>
+  );
+}
+
+function InstitutionsTab({db,showToast}){
+  const[search,setSearch]=useState("");
+  const[edit,setEdit]=useState(null);
+  const usedNames=new Set(db.students.map(s=>s.institution).filter(Boolean));
+  const rows=SA_UNIVERSITIES.filter(u=>u.name.toLowerCase().includes(search.toLowerCase())||u.abbr.toLowerCase().includes(search.toLowerCase()))
+    .sort((a,b)=>(usedNames.has(b.name)?1:0)-(usedNames.has(a.name)?1:0));
+  return(
+    <>
+      <PageHeader title="Institutions"/>
+      <Pad>
+        <p style={{fontSize:12.5,color:"#64748b",marginBottom:13,lineHeight:1.6}}>Set an accent colour and (optionally) an official logo for each institution. This branding is used on the letterhead of generated PDF reports for students at that institution. Institutions with students currently registered are listed first.</p>
+        <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search institutions…" style={{...IS,maxWidth:320,marginBottom:13}}/>
+        <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(280px,1fr))",gap:10}}>
+          {rows.map(u=>{
+            const b=getInstitutionBranding(db,u.name);
+            const configured=db.institutionBranding.some(x=>x.id===u.name);
+            return(
+              <div key={u.name} onClick={()=>setEdit(u)} style={{border:"1px solid #e2e8f0",borderRadius:10,padding:12,display:"flex",alignItems:"center",gap:10,cursor:"pointer",background:"white"}}>
+                {b.logoUrl?<img src={b.logoUrl} alt="" style={{height:30,maxWidth:60,objectFit:"contain",flexShrink:0}} onError={e=>{e.target.style.display="none";}}/>
+                  :<div style={{width:30,height:30,borderRadius:7,background:b.color,color:"white",display:"flex",alignItems:"center",justifyContent:"center",fontWeight:800,fontSize:10,flexShrink:0}}>{u.abbr.slice(0,3)}</div>}
+                <div style={{flex:1,minWidth:0}}>
+                  <div style={{fontWeight:700,fontSize:12.5,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{u.name}</div>
+                  <div style={{fontSize:11,color:"#94a3b8"}}>{u.abbr}{usedNames.has(u.name)?" · has students":""}{configured?" · branded":""}</div>
+                </div>
+                <Ic n="edit" size={14} c="#94a3b8"/>
+              </div>
+            );
+          })}
+        </div>
+      </Pad>
+      {edit&&<InstitutionEditModal db={db} institution={edit} onClose={()=>setEdit(null)} showToast={showToast}/>}
+    </>
+  );
+}
+
 function AllReportsTab({db}){
   const[view,setView]=useState(null);
   const rows=[...db.submissions].reverse();
@@ -2109,14 +2280,14 @@ function AllReportsTab({db}){
     {label:"Score",     render:r=><span style={{fontWeight:800,color:sc(r.result?.overallScore||0)}}>{r.result?.overallScore??"-"}%</span>},
     {label:"Decision",  render:r=>r.result?.supervisorDecision?<Pill label={r.result.supervisorDecision} bg={sb(r.result.overallScore||0)} color={dc2(r.result.supervisorDecision)}/>:"-"},
     {label:"Date",      render:r=><span style={{color:"#94a3b8",fontSize:12}}>{new Date(r.date).toLocaleDateString("en-ZA")}</span>},
-    {label:"",          render:r=><div style={{display:"flex",gap:5}}><button onClick={()=>setView(r)} style={{background:"none",border:"none",cursor:"pointer",color:"#3b82f6"}}><Ic n="eye" size={14}/></button>{r.extendedResult&&<button onClick={()=>setViewExt(r)} style={{background:"#ede9fe",border:"none",borderRadius:6,padding:"3px 7px",cursor:"pointer",color:"#4f46e5",fontSize:11,fontWeight:600}}>Ext</button>}<PdfDownloadButton submission={r} student={getStu(r.studentId)}/></div>},
+    {label:"",          render:r=><div style={{display:"flex",gap:5}}><button onClick={()=>setView(r)} style={{background:"none",border:"none",cursor:"pointer",color:"#3b82f6"}}><Ic n="eye" size={14}/></button>{r.extendedResult&&<button onClick={()=>setViewExt(r)} style={{background:"#ede9fe",border:"none",borderRadius:6,padding:"3px 7px",cursor:"pointer",color:"#4f46e5",fontSize:11,fontWeight:600}}>Ext</button>}<PdfDownloadButton submission={r} student={getStu(r.studentId)} db={db}/></div>},
   ];
   const[viewExt,setViewExt]=useState(null);
   return(
     <><PageHeader title="All Reports"/>
     <Pad><DataTable cols={cols} rows={rows} empty="No reports submitted yet."/></Pad>
-    {view&&<FeedbackModal submission={view} students={db.students} onClose={()=>setView(null)}/>}
-    {viewExt&&<ExtendedFeedbackModal submission={viewExt} students={db.students} onClose={()=>setViewExt(null)}/>}</>
+    {view&&<FeedbackModal submission={view} students={db.students} db={db} onClose={()=>setView(null)}/>}
+    {viewExt&&<ExtendedFeedbackModal submission={viewExt} students={db.students} db={db} onClose={()=>setViewExt(null)}/>}</>
   );
 }
 
@@ -2403,13 +2574,13 @@ function SupReports({db,myStudents,mySubs}){
     {label:"Score",   render:r=><span style={{fontWeight:800,color:sc(r.result?.overallScore||0)}}>{r.result?.overallScore??"-"}%</span>},
     {label:"Decision",render:r=>r.result?.supervisorDecision?<Pill label={r.result.supervisorDecision} bg={sb(r.result.overallScore||0)} color={dc2(r.result.supervisorDecision)}/>:"-"},
     {label:"Date",    render:r=><span style={{color:"#94a3b8",fontSize:12}}>{new Date(r.date).toLocaleDateString("en-ZA")}</span>},
-    {label:"",        render:r=><div style={{display:"flex",gap:5}}><button onClick={()=>setView(r)} style={{background:"none",border:"none",cursor:"pointer",color:"#3b82f6"}}><Ic n="eye" size={14}/></button>{r.extendedResult&&<button onClick={()=>setViewExt(r)} style={{background:"#ede9fe",border:"none",borderRadius:6,padding:"3px 7px",cursor:"pointer",color:"#4f46e5",fontSize:11,fontWeight:600}}>Ext</button>}<PdfDownloadButton submission={r} student={getStu(r.studentId)}/></div>},
+    {label:"",        render:r=><div style={{display:"flex",gap:5}}><button onClick={()=>setView(r)} style={{background:"none",border:"none",cursor:"pointer",color:"#3b82f6"}}><Ic n="eye" size={14}/></button>{r.extendedResult&&<button onClick={()=>setViewExt(r)} style={{background:"#ede9fe",border:"none",borderRadius:6,padding:"3px 7px",cursor:"pointer",color:"#4f46e5",fontSize:11,fontWeight:600}}>Ext</button>}<PdfDownloadButton submission={r} student={getStu(r.studentId)} db={db}/></div>},
   ];
   return(
     <><PageHeader title="Student Reports"/>
     <Pad><DataTable cols={cols} rows={rows} empty="No reports from your students yet."/></Pad>
-    {view&&<FeedbackModal submission={view} students={[...myStudents,...db.students]} onClose={()=>setView(null)}/>}
-    {viewExt&&<ExtendedFeedbackModal submission={viewExt} students={[...myStudents,...db.students]} onClose={()=>setViewExt(null)}/>}</>
+    {view&&<FeedbackModal submission={view} students={[...myStudents,...db.students]} db={db} onClose={()=>setView(null)}/>}
+    {viewExt&&<ExtendedFeedbackModal submission={viewExt} students={[...myStudents,...db.students]} db={db} onClose={()=>setViewExt(null)}/>}</>
   );
 }
 
@@ -2548,8 +2719,8 @@ function StudentPortal({db,session,onLogout,showToast}){
         {view==="account"&&<StudentAccountPage stu={stu} db={db} showToast={showToast}/>}
       </div>
 
-      {viewSub&&<FeedbackModal submission={viewSub} students={db.students} onClose={()=>setViewSub(null)}/>}
-      {viewExtSub&&<ExtendedFeedbackModal submission={viewExtSub} students={db.students} onClose={()=>setViewExtSub(null)}/>}
+      {viewSub&&<FeedbackModal submission={viewSub} students={db.students} db={db} onClose={()=>setViewSub(null)}/>}
+      {viewExtSub&&<ExtendedFeedbackModal submission={viewExtSub} students={db.students} db={db} onClose={()=>setViewExtSub(null)}/>}
       <style>{"@keyframes spin{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}"}</style>
     </div>
   );
