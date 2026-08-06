@@ -2185,10 +2185,51 @@ function AdminStudentsTab({db,session,showToast}){
 // the app fabricating "official" branding it can't verify.
 // ═══════════════════════════════════════════════════════════
 
+// Reads an uploaded image, downsizes it (so logos stay small enough to comfortably
+// store as a data URL in Firebase RTDB), and returns a PNG data URL — which works
+// as a drop-in value for the same `logoUrl` field used for external links, since
+// <img src> accepts data URLs exactly like normal ones.
+function resizeImageToDataUrl(file, maxDim = 240) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const img = new Image();
+      img.onload = () => {
+        let { width, height } = img;
+        if (width > maxDim || height > maxDim) {
+          if (width > height) { height = Math.round(height * maxDim / width); width = maxDim; }
+          else { width = Math.round(width * maxDim / height); height = maxDim; }
+        }
+        const canvas = document.createElement("canvas");
+        canvas.width = width; canvas.height = height;
+        const ctx = canvas.getContext("2d");
+        ctx.clearRect(0, 0, width, height);
+        ctx.drawImage(img, 0, 0, width, height);
+        resolve(canvas.toDataURL("image/png"));
+      };
+      img.onerror = () => reject(new Error("Could not read that image file."));
+      img.src = reader.result;
+    };
+    reader.onerror = () => reject(new Error("Could not read that file."));
+    reader.readAsDataURL(file);
+  });
+}
+
 function InstitutionEditModal({db,institution,onClose,showToast}){
   const existing=db.institutionBranding.find(b=>b.id===institution.name);
   const[color,setColor]=useState(existing?.color||fallbackInstitutionColor(institution.name));
   const[logoUrl,setLogoUrl]=useState(existing?.logoUrl||"");
+  const[uploading,setUploading]=useState(false);
+  const[uploadErr,setUploadErr]=useState("");
+  const fileRef=useRef();
+  const handleFile=async f=>{
+    if(!f)return;
+    if(!f.type.startsWith("image/")){setUploadErr("Please choose an image file.");return;}
+    setUploading(true);setUploadErr("");
+    try{ setLogoUrl(await resizeImageToDataUrl(f)); }
+    catch(e){ setUploadErr(e.message||"Could not process that image."); }
+    setUploading(false);
+  };
   const save=()=>{
     db.setInstitutionBranding(prev=>{
       const rest=prev.filter(b=>b.id!==institution.name);
@@ -2212,9 +2253,19 @@ function InstitutionEditModal({db,institution,onClose,showToast}){
         </div>
       </div>
       <div style={{marginBottom:14}}>
-        <label style={LS}>Logo URL (optional)</label>
-        <input value={logoUrl} onChange={e=>setLogoUrl(e.target.value)} placeholder="https://www.example.ac.za/logo.png" style={IS}/>
-        <p style={{fontSize:11.5,color:"#94a3b8",marginTop:5,lineHeight:1.5}}>Use a direct link to the institution's own official logo image, hosted on a page you have the rights to use — e.g. their public website or your own storage. Leave blank to use a plain monogram in the accent colour instead.</p>
+        <label style={LS}>Logo</label>
+        <input ref={fileRef} type="file" accept="image/*" style={{display:"none"}} onChange={e=>handleFile(e.target.files[0])}/>
+        <div style={{display:"flex",gap:6,marginBottom:8}}>
+          <button type="button" onClick={()=>fileRef.current?.click()} disabled={uploading} style={{...BP,width:"auto",flex:1,padding:"9px 12px",fontSize:12.5,display:"flex",alignItems:"center",justifyContent:"center",gap:6,opacity:uploading?.6:1}}>
+            <Ic n="upload" size={14} c="white"/> {uploading?"Processing…":"Upload Image"}
+          </button>
+          {logoUrl&&<button type="button" onClick={()=>setLogoUrl("")} style={{background:"#fee2e2",border:"none",borderRadius:9,padding:"9px 12px",color:"#dc2626",fontWeight:700,fontSize:12.5,cursor:"pointer"}}>Clear</button>}
+        </div>
+        {uploadErr&&<p style={{fontSize:12,color:"#dc2626",marginBottom:8}}>{uploadErr}</p>}
+        <label style={{...LS,fontSize:10.5}}>Or paste an image URL</label>
+        <input value={logoUrl.startsWith("data:")?"":logoUrl} onChange={e=>setLogoUrl(e.target.value)} placeholder="https://www.example.ac.za/logo.png" style={IS} disabled={logoUrl.startsWith("data:")}/>
+        {logoUrl.startsWith("data:")&&<p style={{fontSize:11,color:"#94a3b8",marginTop:4}}>An uploaded image is set — click Clear above to paste a URL instead.</p>}
+        <p style={{fontSize:11.5,color:"#94a3b8",marginTop:6,lineHeight:1.5}}>Upload the institution's own official logo image (only from a source you have the rights to use), or link directly to it. Leave blank to use a plain monogram in the accent colour instead.</p>
       </div>
       <div style={{background:"#f8fafc",borderRadius:9,padding:12,marginBottom:16}}>
         <label style={{...LS,marginBottom:8}}>Preview</label>
