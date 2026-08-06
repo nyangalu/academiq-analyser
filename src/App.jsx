@@ -1,7 +1,6 @@
 import { useState, useRef, useCallback, useEffect } from "react";
 import React from "react";
 import mammoth from "mammoth";
-import { jsPDF } from "jspdf";
 import { initializeApp } from "firebase/app";
 import { getDatabase, ref, onValue, set, update, remove, get } from "firebase/database";
 
@@ -1032,266 +1031,253 @@ async function extractPdfText(file) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// PDF REPORT GENERATION — renders the SAME styled HTML as the on-screen
-// report (via a hidden off-screen container + html2canvas), then slices
-// it into A4 pages at safe boundaries so no line of text is ever cut.
-// This guarantees the PDF visually matches the in-app report exactly,
-// since it's the browser's own text engine doing the layout, not jsPDF's.
+// PRINTABLE REPORT — builds a standalone HTML document and opens the
+// browser's native print dialog (so the person picks "Save as PDF").
+// This uses the browser's own text engine for layout/pagination, which
+// sidesteps every class of bug we hit with programmatic PDF generation:
+// no font-encoding issues, no manual width math, no rasterization/
+// contrast problems, crisp text at any zoom level.
 // ═══════════════════════════════════════════════════════════════════════
 
 const esc = s => String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 
-// Every "atomic" block that must never be split across a page break gets class="pb".
-function pdfListBlock(title, items, color, bg, mark, titleColor) {
+// Light, print-safe colour palette for priority levels — matches the visual
+// language of the reference reports (colour-coded left border + light tint,
+// never a dark solid fill, since that reads poorly on paper/PDF).
+const PRINT_PRIORITY = {
+  Critical:  {bg:"#fef2f2", border:"#dc2626", text:"#7f1d1d"},
+  Serious:   {bg:"#fff7ed", border:"#ea580c", text:"#9a3412"},
+  Important: {bg:"#fffbeb", border:"#d97706", text:"#78350f"},
+  Minor:     {bg:"#eff6ff", border:"#3b82f6", text:"#1e3a8a"},
+};
+const printPriorityColor = p => PRINT_PRIORITY[p] || {bg:"#f8fafc", border:"#94a3b8", text:"#334155"};
+
+function printListBlock(title, items, color, bg, border, mark) {
   if (!items || !items.length) return "";
-  return `<div class="pb" style="margin-bottom:14px;">
-    <div style="font-size:11.5px;font-weight:800;color:${titleColor};text-transform:uppercase;letter-spacing:.04em;margin-bottom:7px;">${esc(title)}</div>
-    ${items.map(it => `<div class="pb" style="background:${bg};color:${color};border-radius:8px;padding:9px 12px;margin-bottom:6px;font-size:12.5px;line-height:1.55;">${mark} ${esc(it)}</div>`).join("")}
+  return `<div class="card" style="margin-bottom:16px;">
+    <div class="eyebrow" style="color:${color};">${esc(title)}</div>
+    ${items.map(it => `<div class="row" style="background:${bg};border-left:4px solid ${border};color:${color};">${mark ? `<strong>${mark}</strong> ` : ""}${esc(it)}</div>`).join("")}
   </div>`;
 }
 
-function pdfSectionsBlock(sections) {
+function printSectionsBlock(sections) {
   if (!sections || !sections.length) return "";
-  return `<div style="margin-bottom:6px;">
-    <div class="pb" style="font-size:15px;font-weight:800;margin:0 0 14px;border-top:1px solid #e2e8f0;padding-top:20px;">Section-by-Section Breakdown</div>
+  return `<h2 class="h2">Section-by-Section Breakdown</h2>
     ${sections.map(s => {
-      const c = sc(s.score), b = sb(s.score);
-      return `<div class="pb" style="margin-bottom:16px;background:#fafbfc;border:1px solid #f1f5f9;border-radius:10px;padding:14px 16px;">
-        <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:6px;">
-          <span style="font-weight:700;font-size:13px;">${esc(s.name)} <span style="font-weight:500;color:#64748b;">(Grade: ${esc(s.grade || "—")})</span></span>
-          <span style="font-weight:800;font-size:13px;color:${c};">${s.score}/100</span>
+      const c = sc(s.score);
+      return `<div class="card section-card">
+        <div class="section-head">
+          <span class="section-name">${esc(s.name)} <span class="muted">(Grade: ${esc(s.grade || "—")})</span></span>
+          <span class="score-num" style="color:${c};">${s.score}/100</span>
         </div>
-        <div style="height:5px;background:#e2e8f0;border-radius:3px;margin-bottom:10px;overflow:hidden;"><div style="height:100%;width:${Math.max(0, Math.min(100, s.score))}%;background:${c};"></div></div>
-        ${pdfListBlock("Strengths", s.strengths, "#166534", "#f0fdf4", "+", "#16a34a")}
-        ${pdfListBlock("Weaknesses", s.weaknesses, "#7f1d1d", "#fee2e2", "-", "#dc2626")}
-        ${s.supervisorInstruction ? `<div class="pb" style="background:#fffbeb;color:#78350f;border-radius:8px;padding:9px 12px;font-size:12px;line-height:1.55;"><strong>Instruction:</strong> ${esc(s.supervisorInstruction)}</div>` : ""}
+        <div class="bar"><div class="bar-fill" style="width:${Math.max(0, Math.min(100, s.score))}%;background:${c};"></div></div>
+        ${printListBlock("Strengths", s.strengths, "#166534", "#f0fdf4", "#16a34a", "+")}
+        ${printListBlock("Weaknesses", s.weaknesses, "#7f1d1d", "#fef2f2", "#dc2626", "–")}
+        ${s.supervisorInstruction ? `<div class="row instruction"><strong>Instruction:</strong> ${esc(s.supervisorInstruction)}</div>` : ""}
       </div>`;
-    }).join("")}
-  </div>`;
+    }).join("")}`;
 }
 
-function pdfPriorityBlock(actions) {
+function printPriorityBlock(actions) {
   if (!actions || !actions.length) return "";
-  return `<div style="margin-bottom:6px;">
-    <div class="pb" style="font-size:15px;font-weight:800;margin:0 0 12px;border-top:1px solid #e2e8f0;padding-top:20px;">Priority Actions</div>
-    ${actions.map(a => `<div class="pb" style="background:${pb(a.priority)};color:${pc(a.priority)};border-radius:8px;padding:9px 12px;margin-bottom:6px;font-size:12.5px;line-height:1.55;"><strong>[${esc(a.priority)}]</strong> ${esc(a.action)}</div>`).join("")}
-  </div>`;
+  return `<h2 class="h2">Priority Actions</h2>
+    <div class="card">
+      ${actions.map(a => { const c = printPriorityColor(a.priority); return `<div class="row" style="background:${c.bg};border-left:4px solid ${c.border};color:${c.text};"><strong>[${esc(a.priority)}]</strong> ${esc(a.action)}</div>`; }).join("")}
+    </div>`;
 }
 
-function pdfParaBlock(title, text) {
+function printParaBlock(title, text) {
   if (!text) return "";
-  return `<div class="pb" style="margin-bottom:6px;border-top:1px solid #e2e8f0;padding-top:20px;">
-    <div style="font-size:13px;font-weight:800;margin:0 0 8px;">${esc(title)}</div>
-    <p style="font-size:12.5px;line-height:1.65;color:#334155;margin:0;">${esc(text)}</p>
-  </div>`;
+  return `<h3 class="h3">${esc(title)}</h3><p class="para">${esc(text)}</p>`;
 }
 
-function pdfScoreLine(label, score, comment) {
+function printScoreLine(label, score, comment) {
   const c = sc(score);
-  return `<div class="pb" style="margin-bottom:12px;">
-    <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:5px;">
-      <span style="font-weight:700;font-size:12.5px;color:#374151;">${esc(label)}</span>
-      <span style="font-weight:800;font-size:13px;color:${c};">${score}/100</span>
+  return `<div class="score-line">
+    <div class="section-head" style="margin-bottom:4px;">
+      <span class="muted-strong">${esc(label)}</span>
+      <span class="score-num" style="font-size:13px;color:${c};">${score}/100</span>
     </div>
-    <div style="height:4px;background:#e2e8f0;border-radius:2px;margin-bottom:6px;overflow:hidden;"><div style="height:100%;width:${Math.max(0, Math.min(100, score))}%;background:${c};"></div></div>
-    ${comment ? `<p style="font-size:11.5px;line-height:1.5;color:#64748b;margin:0;">${esc(comment)}</p>` : ""}
+    <div class="bar" style="height:4px;"><div class="bar-fill" style="width:${Math.max(0, Math.min(100, score))}%;background:${c};"></div></div>
+    ${comment ? `<p class="para small" style="margin-top:5px;">${esc(comment)}</p>` : ""}
   </div>`;
 }
 
-function pdfHeaderHTML(title, submission, student, extraBadges) {
+function printHeaderHTML(title, subtitle, submission, student) {
   const badges = [];
-  if (docTypeBadgeLabel(submission)) badges.push(`<span style="background:rgba(255,255,255,.15);color:white;padding:4px 12px;border-radius:99px;font-size:11.5px;font-weight:600;">${esc(docTypeBadgeLabel(submission))}</span>`);
-  if (submission.chunked) badges.push(`<span style="background:rgba(255,255,255,.15);color:white;padding:4px 12px;border-radius:99px;font-size:11.5px;font-weight:600;">Full document · ${submission.chunksUsed} sections</span>`);
-  if (submission.chunksFailed > 0) badges.push(`<span style="background:#dc2626;color:white;padding:4px 12px;border-radius:99px;font-size:11.5px;font-weight:600;">${submission.chunksFailed} section${submission.chunksFailed > 1 ? "s" : ""} unreadable</span>`);
-  return `<div class="pb" style="background:linear-gradient(135deg,#1e293b,#334155);padding:26px 30px;color:white;">
-    <div style="font-size:20px;font-weight:800;margin-bottom:6px;">${esc(title)}</div>
-    <div style="font-size:13px;font-weight:700;">${esc(student.initials || "")} ${esc(student.surname || "")} · ${esc(student.number || "")} · ${esc(student.level || "")}</div>
-    <div style="font-size:11.5px;color:rgba(255,255,255,.7);margin-top:4px;">${esc(submission.filename || "Document")} · Submitted ${esc(new Date(submission.date).toLocaleDateString("en-ZA"))}${submission.submittedBy ? " · Submitted by " + esc(submission.submittedBy) : ""}</div>
-    <div style="display:flex;gap:7px;margin-top:12px;flex-wrap:wrap;">${(extraBadges || []).join("")}${badges.join("")}</div>
+  if (docTypeBadgeLabel(submission)) badges.push(esc(docTypeBadgeLabel(submission)));
+  if (submission.chunked) badges.push(`Full document · ${submission.chunksUsed} sections`);
+  if (submission.chunksFailed > 0) badges.push(`⚠ ${submission.chunksFailed} section(s) unreadable`);
+  return `<div class="header">
+    <h1>${esc(title)}</h1>
+    <div class="header-sub">${esc(subtitle)}</div>
+    <div class="header-grid">
+      <div><span class="hlabel">Student</span><br/>${esc(student.initials || "")} ${esc(student.surname || "")}</div>
+      <div><span class="hlabel">Student No.</span><br/>${esc(student.number || "")}</div>
+      <div><span class="hlabel">Level</span><br/>${esc(student.level || "")}</div>
+      <div><span class="hlabel">Document</span><br/>${esc(submission.filename || "Document")}</div>
+    </div>
+    <div class="header-sub" style="margin-top:8px;">Submitted ${esc(new Date(submission.date).toLocaleDateString("en-ZA"))}${submission.submittedBy ? " · Submitted by " + esc(submission.submittedBy) : ""}${badges.length ? " · " + badges.join(" · ") : ""}</div>
   </div>`;
 }
 
-function buildStandardReportHTML(submission, student) {
+function buildStandardReportSection(submission, student) {
   const r = submission.result;
   if (!r) return "";
-  const scoreBadge = `<span style="background:${sb(r.overallScore)};color:${sc(r.overallScore)};padding:4px 12px;border-radius:99px;font-size:11.5px;font-weight:700;">${r.overallScore}% · ${esc(r.overallGrade)}</span>`;
-  const decBadge = `<span style="background:${dc2(r.supervisorDecision)}30;color:${dc2(r.supervisorDecision)};padding:4px 12px;border-radius:99px;font-size:11.5px;font-weight:700;">${esc(r.supervisorDecision)}</span>`;
-  return `<div style="font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;color:#0f172a;width:760px;background:white;">
-    ${pdfHeaderHTML("Assessment Report", submission, student, [scoreBadge, decBadge])}
-    <div style="padding:26px 30px;">
-      ${r.overallVerdict ? `<p class="pb" style="font-size:12.5px;line-height:1.6;color:#0c4a6e;background:#f0f9ff;border-radius:10px;padding:13px 15px;margin:0 0 16px;">${esc(r.overallVerdict)}</p>` : ""}
-      ${pdfListBlock("Strengths", r.positives, "#14532d", "#f0fdf4", "+", "#16a34a")}
-      ${pdfListBlock("Critical Issues", r.criticalIssues, "#7f1d1d", "#fee2e2", "-", "#dc2626")}
-      ${pdfSectionsBlock(r.sections)}
-      ${pdfPriorityBlock(r.priorityActions)}
-      ${pdfParaBlock("Disciplinary Assessment", r.disciplinaryAssessment)}
-      ${pdfParaBlock("ECSA Graduate Attributes", r.ecsa_ga_notes)}
+  return `${printHeaderHTML("Assessment Report", "AcademiQ Analyser — Supervisor Assessment", submission, student)}
+    <div class="badges">
+      <span class="badge" style="background:${sb(r.overallScore)};color:${sc(r.overallScore)};">${r.overallScore}% · ${esc(r.overallGrade)}</span>
+      <span class="badge" style="background:${dc2(r.supervisorDecision)}22;color:${dc2(r.supervisorDecision)};">${esc(r.supervisorDecision)}</span>
     </div>
-  </div>`;
+    ${r.overallVerdict ? `<p class="verdict">${esc(r.overallVerdict)}</p>` : ""}
+    ${printListBlock("Strengths", r.positives, "#14532d", "#f0fdf4", "#16a34a", "+")}
+    ${printListBlock("Critical Issues", r.criticalIssues, "#7f1d1d", "#fef2f2", "#dc2626", "–")}
+    ${printSectionsBlock(r.sections)}
+    ${printPriorityBlock(r.priorityActions)}
+    ${printParaBlock("Disciplinary Assessment", r.disciplinaryAssessment)}
+    ${printParaBlock("ECSA Graduate Attributes", r.ecsa_ga_notes)}`;
 }
 
-function buildExtendedReportHTML(submission, student) {
+function buildExtendedReportSection(submission, student) {
   const x = submission.extendedResult;
   if (!x) return "";
-  const langBadge = x.languageReview ? `<span style="background:rgba(255,255,255,.1);color:rgba(255,255,255,.85);padding:4px 12px;border-radius:99px;font-size:11.5px;">Language: ${x.languageReview.overallLanguageScore}/100</span>` : "";
-  let html = `<div style="font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;color:#0f172a;width:760px;background:white;">
-    ${pdfHeaderHTML("Extended Editorial Review", submission, student, [langBadge])}
-    <div style="padding:26px 30px;">`;
+  let html = `<div class="page-break"></div>${printHeaderHTML("Extended Editorial Review", "AcademiQ Analyser — Language, Literature, Citations, AI Detection & Flow", submission, student)}`;
 
   if (x.languageReview) {
     const l = x.languageReview;
-    html += `<div class="pb" style="font-size:15px;font-weight:800;margin:0 0 12px;">Language &amp; Grammar</div>`;
-    html += pdfScoreLine("Overall Language Score", l.overallLanguageScore, null);
-    html += pdfScoreLine("Readability", l.readabilityScore, l.readabilityComment);
-    if (l.spellingErrors?.length) html += pdfListBlock("Spelling Errors", l.spellingErrors.map(e => `${e.original} -> ${e.correction}${e.context ? `  ("${e.context}")` : ""}`), "#7f1d1d", "#fee2e2", "-", "#dc2626");
-    if (l.grammarErrors?.length) html += pdfListBlock("Grammar Issues", l.grammarErrors.map(e => `${e.issue}${e.location ? `  ("${e.location}")` : ""}${e.suggestion ? "  -> " + e.suggestion : ""}`), "#78350f", "#fffbeb", "-", "#d97706");
-    if (l.styleIssues?.length) html += pdfListBlock("Style Issues", l.styleIssues.map(e => `${e.type}${e.location ? `  ("${e.location}")` : ""}${e.suggestion ? "  -> " + e.suggestion : ""}`), "#1e3a8a", "#eff6ff", "-", "#2563b0");
+    html += `<h2 class="h2">Language &amp; Grammar</h2>`;
+    html += printScoreLine("Overall Language Score", l.overallLanguageScore, null);
+    html += printScoreLine("Readability", l.readabilityScore, l.readabilityComment);
+    if (l.spellingErrors?.length) html += printListBlock("Spelling Errors", l.spellingErrors.map(e => `${e.original} → ${e.correction}${e.context ? `  ("${e.context}")` : ""}`), "#7f1d1d", "#fef2f2", "#dc2626", null);
+    if (l.grammarErrors?.length) html += printListBlock("Grammar Issues", l.grammarErrors.map(e => `${e.issue}${e.location ? `  ("${e.location}")` : ""}${e.suggestion ? "  → " + e.suggestion : ""}`), "#78350f", "#fffbeb", "#d97706", null);
+    if (l.styleIssues?.length) html += printListBlock("Style Issues", l.styleIssues.map(e => `${e.type}${e.location ? `  ("${e.location}")` : ""}${e.suggestion ? "  → " + e.suggestion : ""}`), "#1e3a8a", "#eff6ff", "#3b82f6", null);
   }
 
   if (x.literatureReview) {
     const lr = x.literatureReview;
-    html += `<div class="pb" style="font-size:15px;font-weight:800;margin:20px 0 12px;border-top:1px solid #e2e8f0;padding-top:20px;">Literature Review</div>`;
-    html += pdfScoreLine("Funnel Approach", lr.funnelApproachScore, lr.funnelApproachComment);
-    html += pdfScoreLine("Relevance", lr.relevanceScore, lr.relevanceComment);
-    html += pdfScoreLine("Critical Analysis", lr.criticalAnalysisScore, lr.criticalAnalysisComment);
-    html += pdfScoreLine("Flow", lr.flowScore, lr.flowComment);
-    if (lr.gaps?.length) html += pdfListBlock("Gaps Identified", lr.gaps, "#7f1d1d", "#fee2e2", "-", "#dc2626");
-    if (lr.strengths?.length) html += pdfListBlock("Strengths", lr.strengths, "#14532d", "#f0fdf4", "+", "#16a34a");
+    html += `<h2 class="h2">Literature Review</h2>`;
+    html += printScoreLine("Funnel Approach", lr.funnelApproachScore, lr.funnelApproachComment);
+    html += printScoreLine("Relevance", lr.relevanceScore, lr.relevanceComment);
+    html += printScoreLine("Critical Analysis", lr.criticalAnalysisScore, lr.criticalAnalysisComment);
+    html += printScoreLine("Flow", lr.flowScore, lr.flowComment);
+    if (lr.gaps?.length) html += printListBlock("Gaps Identified", lr.gaps, "#7f1d1d", "#fef2f2", "#dc2626", null);
+    if (lr.strengths?.length) html += printListBlock("Strengths", lr.strengths, "#14532d", "#f0fdf4", "#16a34a", null);
   }
 
   if (x.citationReview) {
     const c = x.citationReview;
-    html += `<div class="pb" style="font-size:15px;font-weight:800;margin:20px 0 12px;border-top:1px solid #e2e8f0;padding-top:20px;">Citations &amp; References</div>`;
-    html += pdfScoreLine("Citation Score", c.overallCitationScore, c.citationIssuesSummary);
-    if (c.inTextCitations?.length) html += pdfListBlock("In-Text Citations", c.inTextCitations.map(ci => `${ci.citation}${ci.isCorrect ? " (correct)" : `  Issue: ${ci.issue || ""}${ci.correction ? "  -> " + ci.correction : ""}`}`), "#334155", "#f8fafc", "•", "#374151");
-    if (c.referenceList?.length) html += pdfListBlock("Reference List", c.referenceList.map(rf => `${rf.fullReference}${rf.isCorrect ? "" : `  Issue: ${rf.issue || ""}${rf.correction ? "  -> " + rf.correction : ""}`}`), "#334155", "#f8fafc", "•", "#374151");
-    if (c.missingReferences?.length) html += pdfListBlock("Cited but not in Reference List", c.missingReferences, "#7f1d1d", "#fee2e2", "-", "#dc2626");
-    if (c.orphanedReferences?.length) html += pdfListBlock("In Reference List but not Cited", c.orphanedReferences, "#78350f", "#fffbeb", "!", "#d97706");
+    html += `<h2 class="h2">Citations &amp; References</h2>`;
+    html += printScoreLine("Citation Score", c.overallCitationScore, c.citationIssuesSummary);
+    if (c.inTextCitations?.length) html += printListBlock("In-Text Citations", c.inTextCitations.map(ci => `${ci.citation}${ci.isCorrect ? " (correct)" : `  Issue: ${ci.issue || ""}${ci.correction ? "  → " + ci.correction : ""}`}`), "#334155", "#f8fafc", "#94a3b8", null);
+    if (c.referenceList?.length) html += printListBlock("Reference List", c.referenceList.map(rf => `${rf.fullReference}${rf.isCorrect ? "" : `  Issue: ${rf.issue || ""}${rf.correction ? "  → " + rf.correction : ""}`}`), "#334155", "#f8fafc", "#94a3b8", null);
+    if (c.missingReferences?.length) html += printListBlock("Cited but not in Reference List", c.missingReferences, "#7f1d1d", "#fef2f2", "#dc2626", null);
+    if (c.orphanedReferences?.length) html += printListBlock("In Reference List but not Cited", c.orphanedReferences, "#78350f", "#fffbeb", "#d97706", null);
   }
 
   if (x.aiDetection) {
     const a = x.aiDetection;
-    html += `<div class="pb" style="font-size:15px;font-weight:800;margin:20px 0 12px;border-top:1px solid #e2e8f0;padding-top:20px;">AI Detection</div>`;
-    html += pdfScoreLine("Estimated AI Content", a.estimatedAiPercentage, a.aiComment);
-    if (a.aiSections?.length) html += pdfListBlock("Suspected AI-Generated Sections", a.aiSections.map(s => `${s.section} — ${s.likelihood} likelihood${s.excerpt ? `  ("${s.excerpt}…")` : ""}`), "#7f1d1d", "#fee2e2", "-", "#dc2626");
-    if (a.humanSections?.length) html += pdfListBlock("Human-Written Sections", a.humanSections, "#14532d", "#f0fdf4", "+", "#16a34a");
+    html += `<h2 class="h2">AI Detection</h2>`;
+    html += printScoreLine("Estimated AI Content", a.estimatedAiPercentage, a.aiComment);
+    if (a.aiSections?.length) html += printListBlock("Suspected AI-Generated Sections", a.aiSections.map(s => `${s.section} — ${s.likelihood} likelihood${s.excerpt ? `  ("${s.excerpt}…")` : ""}`), "#7f1d1d", "#fef2f2", "#dc2626", null);
+    if (a.humanSections?.length) html += printListBlock("Human-Written Sections", a.humanSections, "#14532d", "#f0fdf4", "#16a34a", null);
   }
 
   if (x.informationFlow) {
     const f = x.informationFlow;
-    html += `<div class="pb" style="font-size:15px;font-weight:800;margin:20px 0 12px;border-top:1px solid #e2e8f0;padding-top:20px;">Information Flow</div>`;
-    html += pdfScoreLine("Overall Flow", f.overallFlowScore, f.logicalProgressionComment);
-    if (f.sectionFlow?.length) html += pdfListBlock("Section-by-Section Flow", f.sectionFlow.map(s => `${s.section} — ${s.flowScore}/100: ${s.comment}${s.issue ? "  Issue: " + s.issue : ""}`), "#334155", "#f8fafc", "•", "#374151");
-    if (f.recommendations?.length) html += pdfListBlock("Recommendations", f.recommendations, "#1e40af", "#eff6ff", "-", "#374151");
+    html += `<h2 class="h2">Information Flow</h2>`;
+    html += printScoreLine("Overall Flow", f.overallFlowScore, f.logicalProgressionComment);
+    if (f.sectionFlow?.length) html += printListBlock("Section-by-Section Flow", f.sectionFlow.map(s => `${s.section} — ${s.flowScore}/100: ${s.comment}${s.issue ? "  Issue: " + s.issue : ""}`), "#334155", "#f8fafc", "#94a3b8", null);
+    if (f.recommendations?.length) html += printListBlock("Recommendations", f.recommendations, "#1e40af", "#eff6ff", "#3b82f6", null);
   }
 
-  html += pdfParaBlock("Editorial Summary", x.editorialSummary);
-  if (x.priorityCorrections?.length) html += pdfListBlock("Priority Corrections", x.priorityCorrections.map(c => `[${c.priority}/${c.type}] ${c.action}`), "#334155", "#f8fafc", "•", "#374151");
+  html += printParaBlock("Editorial Summary", x.editorialSummary);
+  if (x.priorityCorrections?.length) html += printListBlock("Priority Corrections", x.priorityCorrections.map(c => `[${c.priority}/${c.type}] ${c.action}`), "#334155", "#f8fafc", "#94a3b8", null);
 
-  html += `</div></div>`;
   return html;
 }
 
-// Renders `html` into a hidden off-screen container, then rasterizes it and slices the
-// result into A4-page-sized images, choosing slice boundaries at the gaps BETWEEN
-// ".pb" blocks (never through the middle of one) so no line of text is ever cut.
-async function renderHtmlToPdfPages(doc, html, isFirstSection) {
-  const html2canvas = (await import("html2canvas")).default;
-  const container = document.createElement("div");
-  container.style.position = "fixed";
-  container.style.left = "-9999px";
-  container.style.top = "0";
-  container.style.width = "760px";
-  container.style.background = "#ffffff";
-  container.innerHTML = html;
-  document.body.appendChild(container);
-  await new Promise(res => setTimeout(res, 30));
-
-  const canvas = await html2canvas(container, { scale: 2, backgroundColor: "#ffffff", windowWidth: 760, useCORS: true });
-
-  const blocks = Array.from(container.querySelectorAll(".pb"));
-  const containerTop = container.getBoundingClientRect().top;
-  const scale = canvas.height / container.offsetHeight;
-  const blockEdgesPx = blocks.map(b => {
-    const rect = b.getBoundingClientRect();
-    return { top: (rect.top - containerTop) * scale, bottom: (rect.bottom - containerTop) * scale };
-  });
-  document.body.removeChild(container);
-
-  const pageW = doc.internal.pageSize.getWidth();
-  const pageH = doc.internal.pageSize.getHeight();
-  const imgFullH = (canvas.height * pageW) / canvas.width;
-  const pxPerPt = canvas.height / imgFullH;
-  const pageHeightPx = pageH * pxPerPt;
-
-  let y = 0;
-  let first = true;
-  while (y < canvas.height - 1) {
-    let limit = Math.min(y + pageHeightPx, canvas.height);
-    // Snap the break to the end of the last block that fits, so we never cut one in half.
-    if (limit < canvas.height) {
-      const candidates = blockEdgesPx.filter(e => e.bottom > y && e.bottom <= limit);
-      if (candidates.length) limit = candidates[candidates.length - 1].bottom;
-      else {
-        // No block fully fits (a single block is taller than a page) — fall back to the raw limit.
-      }
-    }
-    const sliceH = Math.max(1, Math.round(limit - y));
-    const pageCanvas = document.createElement("canvas");
-    pageCanvas.width = canvas.width;
-    pageCanvas.height = sliceH;
-    const ctx = pageCanvas.getContext("2d");
-    ctx.fillStyle = "#ffffff";
-    ctx.fillRect(0, 0, pageCanvas.width, pageCanvas.height);
-    ctx.drawImage(canvas, 0, y, canvas.width, sliceH, 0, 0, canvas.width, sliceH);
-    const imgData = pageCanvas.toDataURL("image/jpeg", 0.92);
-    if (!(first && isFirstSection)) doc.addPage();
-    doc.addImage(imgData, "JPEG", 0, 0, pageW, (sliceH * pageW) / canvas.width);
-    y = limit;
-    first = false;
-  }
-}
-
-async function generateReportPDF(submission, student) {
-  const doc = new jsPDF({ unit: "pt", format: "a4" });
+function buildPrintDocument(submission, student) {
   const stu = student || {};
-  await renderHtmlToPdfPages(doc, buildStandardReportHTML(submission, stu), true);
-  if (submission.extendedResult) await renderHtmlToPdfPages(doc, buildExtendedReportHTML(submission, stu), false);
-
-  const pages = doc.internal.getNumberOfPages();
-  for (let i = 1; i <= pages; i++) {
-    doc.setPage(i);
-    doc.setTextColor(148, 163, 184);
-    doc.setFont("helvetica", "normal");
-    doc.setFontSize(8);
-    const pageW = doc.internal.pageSize.getWidth();
-    const pageH = doc.internal.pageSize.getHeight();
-    doc.text("AcademiQ Analyser — Generated report, for supervisory use", 40, pageH - 20);
-    doc.text(`Page ${i} of ${pages}`, pageW - 40, pageH - 20, { align: "right" });
-  }
-
-  const safeName = `${(student?.surname || "student").replace(/[^a-z0-9]/gi, "_")}_${(submission.filename || "report").replace(/\.[^/.]+$/, "").replace(/[^a-z0-9]/gi, "_")}`;
-  doc.save(`${safeName}_AcademiQ_Report.pdf`);
+  const title = `${stu.surname || "Report"} — AcademiQ Assessment`;
+  const body = buildStandardReportSection(submission, stu) + (submission.extendedResult ? buildExtendedReportSection(submission, stu) : "");
+  return `<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8"/>
+<title>${esc(title)}</title>
+<style>
+  @page { size: A4; margin: 16mm 14mm; }
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif; color: #0f172a; margin: 0; padding: 0; font-size: 12.5px; line-height: 1.55; }
+  .toolbar { position: sticky; top: 0; background: #1e293b; color: white; padding: 10px 16px; display: flex; justify-content: space-between; align-items: center; font-size: 13px; z-index: 10; }
+  .toolbar button { background: #3b82f6; color: white; border: none; border-radius: 6px; padding: 8px 16px; font-size: 13px; font-weight: 600; cursor: pointer; }
+  @media print { .toolbar { display: none; } }
+  .content { max-width: 800px; margin: 0 auto; padding: 20px 24px 40px; }
+  .header { background: linear-gradient(135deg,#1e293b,#334155); color: white; padding: 22px 26px; border-radius: 10px; margin-bottom: 18px; break-inside: avoid; }
+  .header h1 { margin: 0 0 4px; font-size: 20px; font-weight: 800; }
+  .header-sub { font-size: 11.5px; color: rgba(255,255,255,.75); }
+  .header-grid { display: grid; grid-template-columns: repeat(4,1fr); gap: 10px; margin-top: 14px; font-size: 12px; }
+  .hlabel { font-size: 9.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; color: rgba(255,255,255,.55); }
+  .badges { display: flex; gap: 8px; margin: 0 0 16px; flex-wrap: wrap; }
+  .badge { padding: 4px 12px; border-radius: 99px; font-size: 11.5px; font-weight: 700; }
+  .verdict { background: #f0f9ff; color: #0c4a6e; border-radius: 8px; padding: 12px 15px; margin: 0 0 18px; font-size: 12.5px; }
+  .card { break-inside: avoid; margin-bottom: 16px; }
+  .section-card { background: #fafbfc; border: 1px solid #f1f5f9; border-radius: 10px; padding: 14px 16px; margin-bottom: 16px; break-inside: avoid; }
+  .eyebrow { font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: .04em; margin-bottom: 7px; }
+  .row { border-radius: 6px; padding: 8px 12px; margin-bottom: 6px; font-size: 12px; break-inside: avoid; }
+  .instruction { background: #fffbeb; border-left: 4px solid #d97706; color: #78350f; }
+  .section-head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 6px; }
+  .section-name { font-weight: 700; font-size: 13px; }
+  .muted { font-weight: 500; color: #64748b; }
+  .muted-strong { font-weight: 700; font-size: 12px; color: #374151; }
+  .score-num { font-weight: 800; font-size: 13px; }
+  .bar { height: 5px; background: #e2e8f0; border-radius: 3px; margin-bottom: 10px; overflow: hidden; }
+  .bar-fill { height: 100%; }
+  .score-line { margin-bottom: 12px; break-inside: avoid; }
+  .h2 { font-size: 15px; font-weight: 800; margin: 22px 0 12px; border-top: 1px solid #e2e8f0; padding-top: 18px; break-after: avoid; }
+  .h3 { font-size: 13px; font-weight: 800; margin: 18px 0 8px; break-after: avoid; }
+  .para { font-size: 12.5px; line-height: 1.65; color: #334155; margin: 0 0 14px; }
+  .para.small { font-size: 11.5px; color: #64748b; margin: 0; }
+  .page-break { break-before: page; page-break-before: always; }
+  .footer-note { text-align: center; font-size: 10px; color: #94a3b8; margin-top: 30px; }
+</style>
+</head>
+<body>
+  <div class="toolbar no-print">
+    <span>Use your browser's print dialog and choose "Save as PDF" to download this report.</span>
+    <button onclick="window.print()">Print / Save as PDF</button>
+  </div>
+  <div class="content">
+    ${body}
+    <div class="footer-note">AcademiQ Analyser — Generated report, for supervisory use</div>
+  </div>
+</body>
+</html>`;
 }
 
-// Shared download button with loading/error feedback — used everywhere a PDF can be downloaded.
+function printReport(submission, student) {
+  const html = buildPrintDocument(submission, student);
+  const win = window.open("", "_blank", "width=900,height=1000");
+  if (!win) { alert("Your browser blocked the print window. Please allow pop-ups for this site and try again."); return; }
+  win.document.open();
+  win.document.write(html);
+  win.document.close();
+  const doPrint = () => { try { win.focus(); win.print(); } catch (e) {} };
+  win.onload = doPrint;
+  setTimeout(doPrint, 500);
+}
+
+// Shared print/download button — used everywhere a PDF report can be generated.
 function PdfDownloadButton({submission,student,variant="icon"}){
-  const[busy,setBusy]=useState(false);
-  const[err,setErr]=useState(false);
-  const run=async()=>{
-    setBusy(true);setErr(false);
-    try{ await generateReportPDF(submission,student); }
-    catch(e){ console.error(e); setErr(true); setTimeout(()=>setErr(false),4000); }
-    setBusy(false);
-  };
+  const run=()=>printReport(submission,student);
   if(variant==="header")return(
-    <button onClick={run} disabled={busy} title={err?"PDF generation failed — try again":"Download PDF"} style={{background:err?"#dc2626":"rgba(255,255,255,.1)",border:"none",borderRadius:7,padding:"0 10px",height:28,cursor:busy?"default":"pointer",display:"flex",alignItems:"center",gap:5,color:"white",fontSize:11,fontWeight:600,opacity:busy?.7:1}}>
-      <Ic n={err?"x":"download"} size={13} c="white"/> {busy?"Generating…":err?"Failed":"PDF"}
+    <button onClick={run} title="Print / Save as PDF" style={{background:"rgba(255,255,255,.1)",border:"none",borderRadius:7,padding:"0 10px",height:28,cursor:"pointer",display:"flex",alignItems:"center",gap:5,color:"white",fontSize:11,fontWeight:600}}>
+      <Ic n="download" size={13} c="white"/> PDF
     </button>
   );
   return(
-    <button onClick={run} disabled={busy} title={err?"PDF generation failed — try again":"Download PDF"} style={{background:"none",border:"none",cursor:busy?"default":"pointer",color:err?"#dc2626":"#64748b",opacity:busy?.5:1}}>
-      <Ic n={err?"x":"download"} size={14}/>
+    <button onClick={run} title="Print / Save as PDF" style={{background:"none",border:"none",cursor:"pointer",color:"#64748b"}}>
+      <Ic n="download" size={14}/>
     </button>
   );
 }
