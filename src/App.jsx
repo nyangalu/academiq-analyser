@@ -486,6 +486,8 @@ const dc2 = d => ({APPROVED:"#16a34a","MINOR REVISIONS":"#2563b0","MAJOR REVISIO
 function docTypeBadgeLabel(submission) {
   if (submission.documentType === "proposal") return "Research Proposal";
   if (submission.documentType === "wip") return "Work in Progress" + (submission.chaptersReviewed?.length ? ` · ${submission.chaptersReviewed.join(", ")}` : "");
+  if (submission.documentType === "conference") return "Conference Paper" + (submission.venue ? ` · ${submission.venue}` : "");
+  if (submission.documentType === "journal") return "Journal Paper" + (submission.venue ? ` · ${submission.venue}` : "");
   if (submission.chapterByChapter) return "Chapter-by-Chapter Review";
   return null;
 }
@@ -1359,9 +1361,11 @@ const CITATION_STYLES = [
 // ═══════════════════════════════════════════════════════════════════════
 
 const DOCUMENT_TYPES = [
-  {id:"full",     label:"Full Thesis"},
-  {id:"proposal", label:"Research Proposal"},
-  {id:"wip",      label:"Work in Progress"},
+  {id:"full",      label:"Full Thesis"},
+  {id:"proposal",  label:"Research Proposal"},
+  {id:"wip",       label:"Work in Progress"},
+  {id:"conference",label:"Conference Paper"},
+  {id:"journal",   label:"Journal Paper"},
 ];
 
 const CHAPTER_OPTIONS = ["Introduction","Literature Review","Methodology / Research Design","Results","Discussion","Conclusion & Recommendations","References","Appendices"];
@@ -1371,7 +1375,7 @@ const CHAPTER_OPTIONS = ["Introduction","Literature Review","Methodology / Resea
 // so no changes are needed anywhere else in the app (rendering, PDF, etc.).
 function buildDocContextInstruction(docContext) {
   if (!docContext) return "";
-  const { documentType = "full", chapters = [], chapterByChapter = false } = docContext;
+  const { documentType = "full", chapters = [], chapterByChapter = false, venue = "" } = docContext;
   if (documentType === "proposal") {
     return `\nASSESSMENT CONTEXT — RESEARCH PROPOSAL: This document is a RESEARCH PROPOSAL, not a completed thesis or in-progress report. Assess it against research-proposal expectations only: clarity of the problem statement and motivation, feasibility of the proposed approach, adequacy of the preliminary/planned literature review, methodological soundness of the PLANNED approach (it has not been executed yet, so judge the plan itself, not results), the research plan/timeline, risk identification, and ethical considerations. Do NOT penalise the student for the absence of Results, Discussion, or Conclusion chapters — a proposal by definition does not contain these; do not list their absence as a critical issue or weakness. Frame "supervisorDecision" as approval to proceed with the proposed research, not as a final-thesis verdict.\n`;
   }
@@ -1379,21 +1383,27 @@ function buildDocContextInstruction(docContext) {
     const list = chapters.length ? chapters.join(", ") : "only the chapters actually present in the submitted text";
     return `\nASSESSMENT CONTEXT — WORK IN PROGRESS: This is a WORK-IN-PROGRESS submission. The supervisor has indicated that ONLY the following chapters/sections are ready for review at this stage: ${list}. Base your "sections" array and overall assessment ONLY on these chapters. Do NOT penalise the student for the absence of later chapters that are not yet due (e.g. Results, Discussion, Conclusion) if they fall outside this list — treat those simply as "not yet submitted", not as a deficiency, and do not list their absence as a critical issue. The overallScore and supervisorDecision should reflect the quality of the SUBMITTED chapters only, not the completeness of the thesis as a whole.\n`;
   }
+  if (documentType === "conference") {
+    return `\nASSESSMENT CONTEXT — CONFERENCE PAPER: This document is a CONFERENCE PAPER submission${venue ? ` targeting "${venue}"` : ""}, not a thesis chapter or full research report. Assess it against conference-paper expectations: a clear, focused novelty/contribution statement; technical soundness of the methodology and experiments GIVEN the typical space constraints of a conference paper (do not expect thesis-level exhaustive depth); appropriately scoped related-work coverage (a few pages positioning the work relative to prior art, NOT a full multi-page literature review — do not penalise it for being shorter than a thesis literature review); clarity and quality of results presentation; conciseness and adherence to a tight page-limit writing style; and correct, complete citation of related work. Structure the "sections" array to match a typical paper structure (e.g. Abstract, Introduction, Related Work, Methodology, Results, Conclusion, References) rather than thesis-chapter categories. Do NOT penalise the paper for lacking the breadth or depth of a full thesis — that is not the genre being assessed.\n`;
+  }
+  if (documentType === "journal") {
+    return `\nASSESSMENT CONTEXT — JOURNAL PAPER: This document is a JOURNAL PAPER submission${venue ? ` targeting "${venue}"` : ""}, not a thesis chapter. Assess it against journal-publication expectations: a comprehensive and critically engaged literature review appropriate for journal standards (more thorough than a conference paper, though the paper is still a single focused study rather than a multi-chapter thesis); a fully reproducible methodology with sufficient technical detail for replication; results that are rigorously validated (statistical significance, error/uncertainty analysis, or equivalent rigour for the field) and clearly presented; an in-depth discussion that interprets findings, compares them against prior work, and explicitly states limitations; and a clearly articulated contribution to knowledge appropriate for publication. Structure the "sections" array to match the paper's actual structure (e.g. Abstract, Introduction, Literature Review, Methodology, Results, Discussion, Conclusion, References). Do NOT penalise the paper for being a single focused study rather than a multi-chapter thesis — that is not the genre being assessed; do expect greater rigour and depth than a conference paper.\n`;
+  }
   if (chapterByChapter) {
     return `\nASSESSMENT CONTEXT — CHAPTER-BY-CHAPTER: This is a full thesis/research report. Structure the "sections" array to follow the ACTUAL chapter structure of this specific document (e.g. "Chapter 1: Introduction", "Chapter 2: Literature Review", using the real chapter numbers/titles from the document itself where possible) rather than generic evaluation categories. Produce one entry per chapter, each thoroughly assessed with its own score, strengths, weaknesses and supervisor instruction.\n`;
   }
   return "";
 }
 
-// Shared UI for picking document type (+ chapters when relevant). Used by both the
-// supervisor/admin/co-supervisor submit modal and the student's own submit form.
-function DocTypeSelector({docType,setDocType,chapters,setChapters,chapterByChapter,setChapterByChapter,customChapters,setCustomChapters}) {
+// Shared UI for picking document type (+ chapters/venue when relevant). Used by
+// both the supervisor/admin/co-supervisor submit modal and the student's own submit form.
+function DocTypeSelector({docType,setDocType,chapters,setChapters,chapterByChapter,setChapterByChapter,customChapters,setCustomChapters,venue,setVenue}) {
   return (
     <div style={{marginBottom:12}}>
       <label style={LS}>Analysis Type</label>
-      <div style={{display:"flex",gap:6,marginBottom:docType!=="full"||chapterByChapter!==undefined?8:0}}>
+      <div style={{display:"flex",flexWrap:"wrap",gap:6,marginBottom:8}}>
         {DOCUMENT_TYPES.map(t=>(
-          <button key={t.id} type="button" onClick={()=>setDocType(t.id)} style={{flex:1,padding:"7px 8px",borderRadius:8,border:docType===t.id?"2px solid #3b82f6":"1px solid #e2e8f0",background:docType===t.id?"#eff6ff":"white",color:docType===t.id?"#1e40af":"#64748b",fontWeight:600,fontSize:11.5,cursor:"pointer"}}>{t.label}</button>
+          <button key={t.id} type="button" onClick={()=>setDocType(t.id)} style={{flex:"1 1 30%",minWidth:100,padding:"7px 8px",borderRadius:8,border:docType===t.id?"2px solid #3b82f6":"1px solid #e2e8f0",background:docType===t.id?"#eff6ff":"white",color:docType===t.id?"#1e40af":"#64748b",fontWeight:600,fontSize:11.5,cursor:"pointer"}}>{t.label}</button>
         ))}
       </div>
       {docType==="wip"&&(
@@ -1412,6 +1422,12 @@ function DocTypeSelector({docType,setDocType,chapters,setChapters,chapterByChapt
           <input type="checkbox" checked={chapterByChapter} onChange={e=>setChapterByChapter(e.target.checked)}/>
           Break down analysis chapter-by-chapter (matches the document's actual chapter structure)
         </label>
+      )}
+      {(docType==="conference"||docType==="journal")&&(
+        <div style={{marginTop:8}}>
+          <label style={{...LS,fontSize:10.5}}>Target {docType==="conference"?"conference":"journal"} name (optional)</label>
+          <input value={venue} onChange={e=>setVenue(e.target.value)} placeholder={docType==="conference"?"e.g. SAUPEC 2026":"e.g. Journal of the SAIEE"} style={{...IS,fontSize:12,padding:"7px 10px"}}/>
+        </div>
       )}
     </div>
   );
@@ -1777,6 +1793,7 @@ function SupSubmitModal({db,student,onClose,showToast,actor}){
   const[chapters,setChapters]=useState([]);
   const[chapterByChapter,setChapterByChapter]=useState(false);
   const[customChapters,setCustomChapters]=useState("");
+  const[venue,setVenue]=useState("");
   const[loading,setLoading]=useState(false);
   const[loadingExt,setLoadingExt]=useState(false);
   const[error,setError]=useState("");
@@ -1815,10 +1832,10 @@ function SupSubmitModal({db,student,onClose,showToast,actor}){
     try{
       const actorPrefix=actorRole==="admin"?`Admin: ${actorName||"Administrator"}. `:actorRole==="cosupervisor"?`Co-Supervisor: ${actorName||""}. `:actorName?`Supervisor: ${actorName}. `:"";
       const notes=actorPrefix+(student.extraPrompt||"");
-      const docContext={documentType:docType,chapters:allChapters,chapterByChapter};
+      const docContext={documentType:docType,chapters:allChapters,chapterByChapter,venue};
       const {result,extendedResult,chunked,chunksUsed,chunksFailed,charsAnalysed,totalChars}=await analyzeSubmission(text,student,notes,{extended,citationStyle:citStyle,onProgress:setProgress,docContext});
       const submittedByLabel=actorRole==="admin"?(actorName?`admin (${actorName})`:"admin"):actorRole==="cosupervisor"?(actorName?`co-supervisor (${actorName})`:"co-supervisor"):"supervisor";
-      const sub={id:"sub_"+uid(),studentId:student.id,filename:file?.name||"Document",date:new Date().toISOString(),submittedBy:submittedByLabel,result,chunked,chunksUsed,chunksFailed,charsAnalysed,totalChars,documentType:docType,chaptersReviewed:docType==="wip"?allChapters:null,chapterByChapter:docType==="full"?chapterByChapter:false,...(extendedResult?{extendedResult,citationStyle:citStyle}:{})};
+      const sub={id:"sub_"+uid(),studentId:student.id,filename:file?.name||"Document",date:new Date().toISOString(),submittedBy:submittedByLabel,result,chunked,chunksUsed,chunksFailed,charsAnalysed,totalChars,documentType:docType,chaptersReviewed:docType==="wip"?allChapters:null,chapterByChapter:docType==="full"?chapterByChapter:false,venue:(docType==="conference"||docType==="journal")?venue:null,...(extendedResult?{extendedResult,citationStyle:citStyle}:{})};
       db.setSubmissions(prev=>[...prev,sub]);
       showToast(extended?"Extended analysis complete!":"Analysis complete!");
       onClose();
@@ -1832,7 +1849,7 @@ function SupSubmitModal({db,student,onClose,showToast,actor}){
       <div style={{background:"#f8fafc",borderRadius:10,padding:"9px 12px",marginBottom:13,fontSize:13}}>
         <span style={{color:sl?.color||"#d97706",fontWeight:700}}>{sl?.label}</span> · {student.level} · {(student.fields||[]).slice(0,2).join(", ")}
       </div>
-      <DocTypeSelector docType={docType} setDocType={setDocType} chapters={chapters} setChapters={setChapters} chapterByChapter={chapterByChapter} setChapterByChapter={setChapterByChapter} customChapters={customChapters} setCustomChapters={setCustomChapters}/>
+      <DocTypeSelector docType={docType} setDocType={setDocType} chapters={chapters} setChapters={setChapters} chapterByChapter={chapterByChapter} setChapterByChapter={setChapterByChapter} customChapters={customChapters} setCustomChapters={setCustomChapters} venue={venue} setVenue={setVenue}/>
       <label style={LS}>Citation Style Used in Document</label>
       <select value={citStyle} onChange={e=>setCitStyle(e.target.value)} style={{...IS,marginBottom:12}}>
         {CITATION_STYLES.map(s=><option key={s.id} value={s.id}>{s.label}</option>)}
@@ -2634,7 +2651,7 @@ function StudentPortal({db,session,onLogout,showToast}){
   const[file,setFile]=useState(null);const[text,setText]=useState("");
   const[loading,setLoading]=useState(false);const[loadingExt,setLoadingExt]=useState(false);
   const[error,setError]=useState("");const[citStyle,setCitStyle]=useState("apa");
-  const[docType,setDocType]=useState("full");const[chapters,setChapters]=useState([]);const[chapterByChapter,setChapterByChapter]=useState(false);const[customChapters,setCustomChapters]=useState("");
+  const[docType,setDocType]=useState("full");const[chapters,setChapters]=useState([]);const[chapterByChapter,setChapterByChapter]=useState(false);const[customChapters,setCustomChapters]=useState("");const[venue,setVenue]=useState("");
   const[viewSub,setViewSub]=useState(null);const[viewExtSub,setViewExtSub]=useState(null);
 
   const mySubs=db.submissions.filter(s=>s.studentId===stu.id);
@@ -2669,9 +2686,9 @@ function StudentPortal({db,session,onLogout,showToast}){
     extended?setLoadingExt(true):setLoading(true);setError("");setProgress("");
     try{
       const notes=(sup?`Supervisor: ${sup.name}. `:"")+( stu.extraPrompt||"");
-      const docContext={documentType:docType,chapters:allChapters,chapterByChapter};
+      const docContext={documentType:docType,chapters:allChapters,chapterByChapter,venue};
       const {result,extendedResult,chunked,chunksUsed,chunksFailed,charsAnalysed,totalChars}=await analyzeSubmission(text,stu,notes,{extended,citationStyle:citStyle,onProgress:setProgress,docContext});
-      const sub={id:"sub_"+uid(),studentId:stu.id,filename:file?.name||"Document",date:new Date().toISOString(),result,chunked,chunksUsed,chunksFailed,charsAnalysed,totalChars,documentType:docType,chaptersReviewed:docType==="wip"?allChapters:null,chapterByChapter:docType==="full"?chapterByChapter:false,...(extendedResult?{extendedResult,citationStyle:citStyle}:{})};
+      const sub={id:"sub_"+uid(),studentId:stu.id,filename:file?.name||"Document",date:new Date().toISOString(),result,chunked,chunksUsed,chunksFailed,charsAnalysed,totalChars,documentType:docType,chaptersReviewed:docType==="wip"?allChapters:null,chapterByChapter:docType==="full"?chapterByChapter:false,venue:(docType==="conference"||docType==="journal")?venue:null,...(extendedResult?{extendedResult,citationStyle:citStyle}:{})};
       db.setSubmissions(prev=>[...prev,sub]);
       extended?setViewExtSub(sub):setViewSub(sub);
       setFile(null);setText("");
@@ -2703,7 +2720,7 @@ function StudentPortal({db,session,onLogout,showToast}){
           <div style={{background:"white",borderRadius:16,border:"1px solid #e2e8f0",padding:"1.75rem"}}>
             <h2 style={{fontSize:16,fontWeight:700,marginBottom:4}}>Submit Your Project</h2>
             <p style={{fontSize:13,color:"#64748b",marginBottom:16}}>Upload your project document for AI-powered analysis.</p>
-            <DocTypeSelector docType={docType} setDocType={setDocType} chapters={chapters} setChapters={setChapters} chapterByChapter={chapterByChapter} setChapterByChapter={setChapterByChapter} customChapters={customChapters} setCustomChapters={setCustomChapters}/>
+            <DocTypeSelector docType={docType} setDocType={setDocType} chapters={chapters} setChapters={setChapters} chapterByChapter={chapterByChapter} setChapterByChapter={setChapterByChapter} customChapters={customChapters} setCustomChapters={setCustomChapters} venue={venue} setVenue={setVenue}/>
             <div style={{marginBottom:13}}>
               <label style={LS}>Citation Style Used in Your Document</label>
               <select value={citStyle} onChange={e=>setCitStyle(e.target.value)} style={IS}>
