@@ -1,25 +1,26 @@
 import { useState, useRef, useCallback, useEffect } from "react";
 import React from "react";
 import mammoth from "mammoth";
-import { initializeApp } from "firebase/app";
-import { getDatabase, ref, onValue, set, update, remove, get } from "firebase/database";
 
 // ═══════════════════════════════════════════════════════════════════════
-// FIREBASE CONFIG
+// SECURE API CLIENT — all database access now goes through server-side
+// API routes (backed by Firebase Admin SDK), never the Firebase client SDK
+// directly. This is what lets the Realtime Database rules be locked to
+// deny all direct access, since only our authenticated server code can
+// reach it — the browser never holds Firebase credentials of any kind.
 // ═══════════════════════════════════════════════════════════════════════
 
-const firebaseConfig = {
-  apiKey: "AIzaSyCMIEfps34CsHDPJ2fdd7klqMpJQWK0gOA",
-  authDomain: "academiq-analyser-c5e16.firebaseapp.com",
-  databaseURL: "https://academiq-analyser-c5e16-default-rtdb.europe-west1.firebasedatabase.app",
-  projectId: "academiq-analyser-c5e16",
-  storageBucket: "academiq-analyser-c5e16.firebasestorage.app",
-  messagingSenderId: "351045621256",
-  appId: "1:351045621256:web:b906cf6e056f78a005e3bd"
-};
+const SESSION_STORAGE_KEY = "academiq_session";
 
-const app = initializeApp(firebaseConfig);
-const db_rt = getDatabase(app);
+async function apiPost(path, body, token) {
+  const headers = { "Content-Type": "application/json" };
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const r = await fetch(path, { method: "POST", headers, body: JSON.stringify(body || {}) });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.error || `Request failed (${r.status})`);
+  return data;
+}
+
 
 // ═══════════════════════════════════════════════════════════════════════
 // CONSTANTS
@@ -33,73 +34,62 @@ const SECURITY_QUESTIONS = ["What is the name of your institution?","What city w
 const uid = () => Math.random().toString(36).slice(2);
 
 // ═══════════════════════════════════════════════════════════════════════
-// FIREBASE HELPERS — read/write to Realtime Database
+// DATA ACCESS — every collection now goes through the secured /api/db
+// proxy instead of talking to Firebase directly. Realtime push updates are
+// gone (that required an open client connection to Firebase); in exchange
+// we poll periodically and always refetch after a local write, which is a
+// reasonable trade for an app this size and is far outweighed by no longer
+// shipping database credentials/rules-bypass to the browser.
 // ═══════════════════════════════════════════════════════════════════════
 
-// Convert Firebase object (keyed by id) → array
-const objToArr = (obj) => obj ? Object.values(obj) : [];
-
-// Write a single record (upsert) to a collection
-const fbSet = (collection, id, data) =>
-  set(ref(db_rt, `${collection}/${id}`), data);
-
-// Delete a record
-const fbDel = (collection, id) =>
-  remove(ref(db_rt, `${collection}/${id}`));
-
-// Seed default admin once (checks if admins node is empty)
-async function seedAdmin() {
-  const snap = await get(ref(db_rt, "admins/adm_default"));
-  if (!snap.exists()) {
-    await fbSet("admins", "adm_default", {
-      id: "adm_default",
-      username: "nyangal",
-      password: "LueRoe2012!",
-      name: "Lungile Nyanga",
-      email: "",
-      securityQ: { question: "What is the name of your institution?", answer: "nwu" },
-      createdAt: new Date().toISOString(),
-    });
-  }
-}
-
-// useFirebase — live-synced state from a Firebase collection
-function useFirebase(collection) {
+// useFirebase — synced state for a collection, backed by /api/db (requires an
+// active session token; returns empty/not-ready until one is available).
+function useFirebase(collection, token) {
   const [data, setData] = useState([]);
   const [ready, setReady] = useState(false);
+  const dataRef = useRef([]);
+  dataRef.current = data;
+
+  const fetchList = useCallback(async () => {
+    if (!token) return;
+    try {
+      const { records } = await apiPost("/api/db", { action: "list", collection }, token);
+      setData(records || []);
+    } catch (e) {
+      console.error(`Failed to load ${collection}:`, e.message);
+    } finally {
+      setReady(true);
+    }
+  }, [collection, token]);
 
   useEffect(() => {
-    const r = ref(db_rt, collection);
-    const unsub = onValue(r, (snap) => {
-      setData(objToArr(snap.val()));
-      setReady(true);
-    });
-    return () => unsub();
-  }, [collection]);
+    if (!token) { setData([]); setReady(false); return; }
+    setReady(false);
+    fetchList();
+    const interval = setInterval(fetchList, 12000); // periodic refresh in place of realtime push
+    return () => clearInterval(interval);
+  }, [token, collection, fetchList]);
 
-  // set(record) — upserts by record.id; or accepts updater fn
+  // setCol(record) — upserts by record.id; or accepts an updater fn(currentArray) => nextArray
   const setCol = useCallback((recordOrFn) => {
-    if (typeof recordOrFn === "function") {
-      // updater: fn receives current array, returns new array
-      // We get current snapshot and apply
-      get(ref(db_rt, collection)).then(snap => {
-        const current = objToArr(snap.val());
-        const next = recordOrFn(current);
-        // Diff: write changed/added records, delete removed ones
-        const nextIds = new Set(next.map(r => r.id));
-        const prevIds = new Set(current.map(r => r.id));
-        // Write all (simple approach — write everything in next)
-        const updates = {};
-        next.forEach(r => { updates[`${collection}/${r.id}`] = r; });
-        // Delete removed
-        current.forEach(r => { if (!nextIds.has(r.id)) updates[`${collection}/${r.id}`] = null; });
-        update(ref(db_rt), updates);
+    const current = dataRef.current;
+    const next = typeof recordOrFn === "function"
+      ? recordOrFn(current)
+      : (current.some(r => r.id === recordOrFn.id) ? current.map(r => r.id === recordOrFn.id ? recordOrFn : r) : [...current, recordOrFn]);
+
+    const currentById = new Map(current.map(r => [r.id, r]));
+    const nextIds = new Set(next.map(r => r.id));
+    const upserts = next.filter(r => JSON.stringify(r) !== JSON.stringify(currentById.get(r.id)));
+    const deletes = current.filter(r => !nextIds.has(r.id)).map(r => r.id);
+
+    setData(next); // optimistic local update
+    if (upserts.length || deletes.length) {
+      apiPost("/api/db", { action: "write", collection, upserts, deletes }, token).catch(e => {
+        console.error(`Failed to save ${collection}:`, e.message);
+        fetchList(); // resync with server on failure
       });
-    } else {
-      // single record upsert
-      fbSet(collection, recordOrFn.id, recordOrFn);
     }
-  }, [collection]);
+  }, [collection, token, fetchList]);
 
   return [data, setCol, ready];
 }
@@ -514,27 +504,38 @@ const BS = {width:"100%",padding:"11px 20px",borderRadius:10,border:"1.5px solid
 // ═══════════════════════════════════════════════════════════════════════
 
 export default function App() {
-  const [admins,     setAdmins,     adminsReady]     = useFirebase("admins");
-  const [supervisors,setSupervisors,supervisorsReady] = useFirebase("supervisors");
-  const [students,   setStudents,   studentsReady]   = useFirebase("students");
-  const [submissions,setSubmissions,submissionsReady]= useFirebase("submissions");
-  const [institutionBranding,setInstitutionBranding,brandingReady]= useFirebase("institutionBranding");
-  const [session,    setSession]    = useState(null);
-  const [toast,      setToast]      = useState(null);
-  const [seeded,     setSeeded]     = useState(false);
+  const [session, setSession] = useState(() => {
+    try { const s = localStorage.getItem(SESSION_STORAGE_KEY); return s ? JSON.parse(s) : null; } catch (e) { return null; }
+  });
+  const token = session?.token || null;
 
-  const ready = adminsReady && supervisorsReady && studentsReady && submissionsReady;
+  const [admins,     setAdmins,     adminsReady]     = useFirebase("admins", token);
+  const [supervisors,setSupervisors,supervisorsReady] = useFirebase("supervisors", token);
+  const [students,   setStudents,   studentsReady]   = useFirebase("students", token);
+  const [submissions,setSubmissions,submissionsReady]= useFirebase("submissions", token);
+  const [institutionBranding,setInstitutionBranding,brandingReady]= useFirebase("institutionBranding", token);
+  const [toast,      setToast]      = useState(null);
+
+  const ready = !session || (adminsReady && supervisorsReady && studentsReady && submissionsReady);
   const showToast = (msg, type="success") => setToast({msg, type});
 
-  useEffect(() => {
-    if (adminsReady && !seeded) {
-      seedAdmin();
-      setSeeded(true);
-    }
-  }, [adminsReady, seeded]);
+  const login = (sessionData) => {
+    setSession(sessionData);
+    try { localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(sessionData)); } catch (e) {}
+  };
+  const logout = () => {
+    setSession(null);
+    try { localStorage.removeItem(SESSION_STORAGE_KEY); } catch (e) {}
+  };
 
-  const db = { admins, setAdmins, supervisors, setSupervisors, students, setStudents, submissions, setSubmissions, institutionBranding, setInstitutionBranding };
-  const logout = () => setSession(null);
+  const db = { admins, setAdmins, supervisors, setSupervisors, students, setStudents, submissions, setSubmissions, institutionBranding, setInstitutionBranding, token };
+
+  if (!session) return (
+    <>
+      <LoginGateway onLogin={login} showToast={showToast}/>
+      {toast && <Toast msg={toast.msg} type={toast.type} onDone={()=>setToast(null)}/>}
+    </>
+  );
 
   if (!ready) return (
     <div style={{minHeight:"100vh",background:"#0f172a",display:"flex",alignItems:"center",justifyContent:"center",fontFamily:"system-ui,sans-serif"}}>
@@ -543,17 +544,10 @@ export default function App() {
           <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2"><path d="M21 12a9 9 0 11-6.219-8.56" style={{animation:"spin 1s linear infinite",transformOrigin:"center"}}/></svg>
         </div>
         <div style={{fontWeight:700,fontSize:16}}>Connecting to AcademiQ…</div>
-        <div style={{color:"rgba(255,255,255,.4)",fontSize:13,marginTop:5}}>Loading data from Firebase</div>
+        <div style={{color:"rgba(255,255,255,.4)",fontSize:13,marginTop:5}}>Loading your data</div>
       </div>
       <style>{"@keyframes spin{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}"}</style>
     </div>
-  );
-
-  if (!session) return (
-    <>
-      <LoginGateway db={db} onLogin={setSession} showToast={showToast}/>
-      {toast && <Toast msg={toast.msg} type={toast.type} onDone={()=>setToast(null)}/>}
-    </>
   );
 
   return (
@@ -619,14 +613,14 @@ function Toast({msg,type,onDone}){useEffect(()=>{const t=setTimeout(onDone,3500)
 // LOGIN GATEWAY
 // ═══════════════════════════════════════════════════════════════
 
-function LoginGateway({db,onLogin,showToast}){
+function LoginGateway({onLogin,showToast}){
   const[tab,setTab]=useState("student");
   const[view,setView]=useState("login");
   const[err,setErr]=useState("");
-  if(view==="forgot_admin") return <ForgotScreen role="admin" db={db} onBack={()=>setView("login")} showToast={showToast}/>;
-  if(view==="forgot_sup")   return <ForgotScreen role="supervisor" db={db} onBack={()=>setView("login")} showToast={showToast}/>;
-  if(view==="forgot_stu")   return <ForgotScreen role="student" db={db} onBack={()=>setView("login")} showToast={showToast}/>;
-  if(view==="reg_sup")      return <RegisterSup db={db} onBack={()=>setView("login")} showToast={showToast}/>;
+  if(view==="forgot_admin") return <ForgotScreen role="admin" onBack={()=>setView("login")} showToast={showToast}/>;
+  if(view==="forgot_sup")   return <ForgotScreen role="supervisor" onBack={()=>setView("login")} showToast={showToast}/>;
+  if(view==="forgot_stu")   return <ForgotScreen role="student" onBack={()=>setView("login")} showToast={showToast}/>;
+  if(view==="reg_sup")      return <RegisterSup onBack={()=>setView("login")} showToast={showToast}/>;
   return (
     <div style={{minHeight:"100vh",background:"linear-gradient(135deg,#0f172a 0%,#1e3a5f 60%,#0f2744 100%)",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",fontFamily:"system-ui,sans-serif",padding:"1rem"}}>
       <div style={{textAlign:"center",marginBottom:"1.5rem"}}>
@@ -642,33 +636,24 @@ function LoginGateway({db,onLogin,showToast}){
             <button key={k} onClick={()=>{setTab(k);setErr("");}} style={{flex:1,padding:"7px 0",borderRadius:8,border:"none",fontWeight:600,fontSize:12,cursor:"pointer",background:tab===k?"white":"transparent",color:tab===k?"#0f172a":"#64748b",boxShadow:tab===k?"0 1px 4px rgba(0,0,0,.1)":"none"}}>{l}</button>
           ))}
         </div>
-        {tab==="student"    && <LoginForm db={db} role="student"    onLogin={onLogin} setErr={setErr} onForgot={()=>setView("forgot_stu")}/>}
-        {tab==="supervisor" && <LoginForm db={db} role="supervisor" onLogin={onLogin} setErr={setErr} onForgot={()=>setView("forgot_sup")} extra={<button onClick={()=>setView("reg_sup")} style={{background:"none",border:"none",color:"#64748b",fontSize:12,cursor:"pointer",textDecoration:"underline"}}>Create account</button>}/>}
-        {tab==="admin"      && <LoginForm db={db} role="admin"      onLogin={onLogin} setErr={setErr} onForgot={()=>setView("forgot_admin")}/>}
+        {tab==="student"    && <LoginForm role="student"    onLogin={onLogin} setErr={setErr} onForgot={()=>setView("forgot_stu")}/>}
+        {tab==="supervisor" && <LoginForm role="supervisor" onLogin={onLogin} setErr={setErr} onForgot={()=>setView("forgot_sup")} extra={<button onClick={()=>setView("reg_sup")} style={{background:"none",border:"none",color:"#64748b",fontSize:12,cursor:"pointer",textDecoration:"underline"}}>Create account</button>}/>}
+        {tab==="admin"      && <LoginForm role="admin"      onLogin={onLogin} setErr={setErr} onForgot={()=>setView("forgot_admin")}/>}
         {err&&<div style={{background:"#fee2e2",color:"#991b1b",borderRadius:8,padding:"9px 13px",fontSize:13,marginTop:10}}>{err}</div>}
       </div>
     </div>
   );
 }
 
-function LoginForm({db,role,onLogin,setErr,onForgot,extra}){
-  const[id,setId]=useState(""); const[pwd,setPwd]=useState("");
-  const go=()=>{
-    setErr("");
-    if(role==="student"){
-      const s=db.students.find(x=>x.number===id.trim());
-      if(!s){setErr("Student number not found. Contact your supervisor.");return;}
-      if(s.password&&s.password!==pwd){setErr("Incorrect password.");return;}
-      onLogin({role:"student",id:s.id});
-    } else if(role==="supervisor"){
-      const s=db.supervisors.find(x=>x.username===id.trim()&&x.password===pwd);
-      if(!s){setErr("Invalid username or password.");return;}
-      onLogin({role:"supervisor",id:s.id});
-    } else {
-      const a=db.admins.find(x=>x.username===id.trim()&&x.password===pwd);
-      if(!a){setErr("Invalid admin credentials.");return;}
-      onLogin({role:"admin",id:a.id});
-    }
+function LoginForm({role,onLogin,setErr,onForgot,extra}){
+  const[id,setId]=useState(""); const[pwd,setPwd]=useState(""); const[busy,setBusy]=useState(false);
+  const go=async()=>{
+    setErr(""); setBusy(true);
+    try{
+      const { token, user } = await apiPost("/api/login", { role, id: id.trim(), password: pwd });
+      onLogin({ role, id: user.id, name: user.name, token });
+    }catch(e){ setErr(e.message || "Sign in failed."); }
+    setBusy(false);
   };
   return (
     <>
@@ -678,7 +663,7 @@ function LoginForm({db,role,onLogin,setErr,onForgot,extra}){
       <label style={LS}>{role==="student"?"Student Number":"Username"}</label>
       <input value={id} onChange={e=>setId(e.target.value)} placeholder={role==="student"?"e.g. 38045869":"Username"} style={{...IS,marginBottom:9}}/>
       {(role!=="student"||id)&&<><label style={LS}>Password</label><PwdInput value={pwd} onChange={e=>setPwd(e.target.value)} onEnter={go}/></>}
-      <button onClick={go} style={{...BP,marginTop:11}}>Sign In</button>
+      <button onClick={go} disabled={busy} style={{...BP,marginTop:11,opacity:busy?.7:1}}>{busy?"Signing in…":"Sign In"}</button>
       <div style={{display:"flex",justifyContent:"space-between",marginTop:7}}>
         <button onClick={onForgot} style={{background:"none",border:"none",color:"#3b82f6",fontSize:12,cursor:"pointer",textDecoration:"underline"}}>Forgot password?</button>
         {extra}
@@ -687,21 +672,23 @@ function LoginForm({db,role,onLogin,setErr,onForgot,extra}){
   );
 }
 
-function RegisterSup({db,onBack,showToast}){
+function RegisterSup({onBack,showToast}){
   const[f,setF]=useState({name:"",username:"",email:"",password:"",conf:"",sqQ:SECURITY_QUESTIONS[0],sqA:""});
-  const[err,setErr]=useState("");
+  const[err,setErr]=useState(""); const[busy,setBusy]=useState(false);
   const up=k=>e=>setF(p=>({...p,[k]:e.target.value}));
-  const save=()=>{
+  const save=async()=>{
     setErr("");
     if(!f.name||!f.username||!f.password)return setErr("Name, username and password required.");
     if(f.password!==f.conf)return setErr("Passwords do not match.");
     if(f.password.length<6)return setErr("Min 6 characters.");
     if(!f.sqA.trim())return setErr("Enter a security answer.");
-    if(db.supervisors.find(s=>s.username===f.username.trim()))return setErr("Username already taken.");
-    const sup={id:"sup_"+uid(),name:f.name.trim(),username:f.username.trim(),email:f.email.trim(),password:f.password,securityQ:{question:f.sqQ,answer:f.sqA.trim().toLowerCase()},createdAt:new Date().toISOString()};
-    db.setSupervisors(p=>[...p,sup]);
-    showToast("Account created! Sign in to continue.");
-    onBack();
+    setBusy(true);
+    try{
+      await apiPost("/api/register-supervisor", { name:f.name.trim(), username:f.username.trim(), email:f.email.trim(), password:f.password, sqQ:f.sqQ, sqA:f.sqA });
+      showToast("Account created! Sign in to continue.");
+      onBack();
+    }catch(e){ setErr(e.message || "Could not create account."); }
+    setBusy(false);
   };
   return (
     <div style={{minHeight:"100vh",background:"linear-gradient(135deg,#0f172a,#1e3a5f,#0f2744)",display:"flex",alignItems:"center",justifyContent:"center",fontFamily:"system-ui,sans-serif",padding:"1rem"}}>
@@ -724,7 +711,7 @@ function RegisterSup({db,onBack,showToast}){
         </div>
         <Err msg={err}/>
         <div style={{display:"flex",gap:8,marginTop:13}}>
-          <button onClick={save} style={BP}>Create Account</button>
+          <button onClick={save} disabled={busy} style={{...BP,opacity:busy?.7:1}}>{busy?"Creating…":"Create Account"}</button>
           <button onClick={onBack} style={BS}>← Back</button>
         </div>
       </div>
@@ -732,36 +719,33 @@ function RegisterSup({db,onBack,showToast}){
   );
 }
 
-function ForgotScreen({role,db,onBack,showToast}){
+function ForgotScreen({role,onBack,showToast}){
   const[step,setStep]=useState("find");
-  const[id,setId]=useState(""); const[found,setFound]=useState(null);
+  const[id,setId]=useState(""); const[question,setQuestion]=useState("");
   const[ans,setAns]=useState(""); const[p1,setP1]=useState(""); const[p2,setP2]=useState("");
-  const[err,setErr]=useState("");
-  const find=()=>{
-    setErr("");
-    let rec=null;
-    if(role==="admin")      rec=db.admins.find(x=>x.username===id.trim());
-    else if(role==="supervisor") rec=db.supervisors.find(x=>x.username===id.trim());
-    else rec=db.students.find(x=>x.number===id.trim());
-    if(!rec||!rec.securityQ?.question){setErr("Account not found or no security question set.");return;}
-    setFound(rec); setStep("verify");
+  const[err,setErr]=useState(""); const[busy,setBusy]=useState(false);
+  const find=async()=>{
+    setErr(""); setBusy(true);
+    try{
+      const { question } = await apiPost("/api/forgot-password", { action:"question", role, id: id.trim() });
+      setQuestion(question); setStep("verify");
+    }catch(e){ setErr(e.message || "Account not found or no security question set."); }
+    setBusy(false);
   };
-  const verify=()=>{
-    setErr("");
-    if(ans.trim().toLowerCase()===found.securityQ.answer.toLowerCase()) setStep("reset");
-    else setErr("Incorrect answer. Try again.");
-  };
-  const reset=()=>{
+  const reset=async()=>{
     setErr("");
     const min=role==="student"?4:6;
+    if(!ans.trim())return setErr("Enter your answer.");
     if(!p1)return setErr("Enter new password.");
     if(p1.length<min)return setErr(`Min ${min} characters.`);
     if(p1!==p2)return setErr("Passwords do not match.");
-    if(role==="admin")           db.setAdmins(prev=>prev.map(a=>a.id===found.id?{...a,password:p1}:a));
-    else if(role==="supervisor") db.setSupervisors(prev=>prev.map(s=>s.id===found.id?{...s,password:p1}:s));
-    else                         db.setStudents(prev=>prev.map(s=>s.id===found.id?{...s,password:p1}:s));
-    showToast("Password reset successfully.");
-    onBack();
+    setBusy(true);
+    try{
+      await apiPost("/api/forgot-password", { action:"reset", role, id: id.trim(), answer: ans, newPassword: p1 });
+      showToast("Password reset successfully.");
+      onBack();
+    }catch(e){ setErr(e.message || "Could not reset password."); }
+    setBusy(false);
   };
   const labels={admin:"Admin Username",supervisor:"Supervisor Username",student:"Student Number"};
   return (
@@ -769,26 +753,22 @@ function ForgotScreen({role,db,onBack,showToast}){
       <div style={{background:"white",borderRadius:20,padding:"2rem",width:"100%",maxWidth:420,boxShadow:"0 25px 60px rgba(0,0,0,.4)"}}>
         <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:16}}>
           <div style={{width:36,height:36,borderRadius:9,background:"#fef3c7",display:"flex",alignItems:"center",justifyContent:"center"}}><Ic n="key" size={18} c="#d97706"/></div>
-          <div><h2 style={{margin:0,fontSize:16,fontWeight:700}}>Reset Password</h2><p style={{margin:0,fontSize:12,color:"#64748b"}}>Step {step==="find"?1:step==="verify"?2:3} of 3</p></div>
+          <div><h2 style={{margin:0,fontSize:16,fontWeight:700}}>Reset Password</h2><p style={{margin:0,fontSize:12,color:"#64748b"}}>Step {step==="find"?1:2} of 2</p></div>
         </div>
         {step==="find"&&(
           <><label style={LS}>{labels[role]}</label>
           <input value={id} onChange={e=>setId(e.target.value)} onKeyDown={e=>e.key==="Enter"&&find()} placeholder={role==="student"?"e.g. 38045869":"Your username"} style={{...IS,marginBottom:8}}/>
-          <Err msg={err}/><button onClick={find} style={{...BP,marginTop:8}}>Find Account</button></>
+          <Err msg={err}/><button onClick={find} disabled={busy} style={{...BP,marginTop:8,opacity:busy?.7:1}}>{busy?"Looking up…":"Find Account"}</button></>
         )}
-        {step==="verify"&&found&&(
-          <><div style={{background:"#f0fdf4",borderRadius:8,padding:"9px 13px",fontSize:13,color:"#14532d",marginBottom:11}}>Found: <strong>{found.name||found.initials+" "+found.surname||found.username}</strong></div>
+        {step==="verify"&&(
+          <>
           <label style={LS}>Security Question</label>
-          <div style={{background:"#f8fafc",borderRadius:8,padding:"9px 12px",fontSize:13,marginBottom:9}}>{found.securityQ.question}</div>
+          <div style={{background:"#f8fafc",borderRadius:8,padding:"9px 12px",fontSize:13,marginBottom:9}}>{question}</div>
           <label style={LS}>Your Answer</label>
-          <input value={ans} onChange={e=>setAns(e.target.value)} onKeyDown={e=>e.key==="Enter"&&verify()} placeholder="Answer" style={{...IS,marginBottom:6}}/>
-          <Err msg={err}/><button onClick={verify} style={{...BP,marginTop:8}}>Verify</button></>
-        )}
-        {step==="reset"&&(
-          <><div style={{background:"#f0fdf4",borderRadius:8,padding:"9px 13px",fontSize:13,color:"#14532d",marginBottom:11}}>Identity verified. Set your new password.</div>
+          <input value={ans} onChange={e=>setAns(e.target.value)} placeholder="Answer" style={{...IS,marginBottom:9}}/>
           <label style={LS}>New Password</label><PwdInput value={p1} onChange={e=>setP1(e.target.value)} placeholder="New password"/>
           <div style={{marginTop:8}}><label style={LS}>Confirm</label><PwdInput value={p2} onChange={e=>setP2(e.target.value)} placeholder="Repeat"/></div>
-          <Err msg={err}/><button onClick={reset} style={{...BP,marginTop:10}}>Save Password</button></>
+          <Err msg={err}/><button onClick={reset} disabled={busy} style={{...BP,marginTop:10,opacity:busy?.7:1}}>{busy?"Saving…":"Save Password"}</button></>
         )}
         <button onClick={onBack} style={{...BS,marginTop:8}}>← Back to Login</button>
       </div>
@@ -911,7 +891,7 @@ function Modal({title,onClose,children,maxW=620}){
 
 function StudentFormModal({db,existing,supervisorId,onClose,showToast}){
   const isNew=!existing;
-  const[f,setF]=useState({surname:existing?.surname||"",initials:existing?.initials||"",number:existing?.number||"",institution:existing?.institution||"",level:existing?.level||"BEng",fields:existing?.fields||[],strictness:existing?.strictness||"strict",rubric:existing?.rubric||"",extraPrompt:existing?.extraPrompt||"",password:existing?.password||"",securityQ:existing?.securityQ||null,supervisorId:existing?.supervisorId||supervisorId||null,coSupervisorIds:existing?.coSupervisorIds||[]});
+  const[f,setF]=useState({surname:existing?.surname||"",initials:existing?.initials||"",number:existing?.number||"",institution:existing?.institution||"",level:existing?.level||"BEng",fields:existing?.fields||[],strictness:existing?.strictness||"strict",rubric:existing?.rubric||"",extraPrompt:existing?.extraPrompt||"",supervisorId:existing?.supervisorId||supervisorId||null,coSupervisorIds:existing?.coSupervisorIds||[]});
   const knownInstitution=SA_UNIVERSITIES.some(u=>u.name===existing?.institution);
   const[customInst,setCustomInst]=useState(existing?.institution&&!knownInstitution);
   const[sqQ,setSqQ]=useState(existing?.securityQ?.question||SECURITY_QUESTIONS[0]);
@@ -925,7 +905,7 @@ function StudentFormModal({db,existing,supervisorId,onClose,showToast}){
     if(f.fields.length===0)return setErr("Select at least one field.");
     const dup=db.students.find(s=>s.number===f.number.trim()&&s.id!==existing?.id);
     if(dup)return setErr("Student number already registered.");
-    const finalF={...f,securityQ:sqA.trim()?{question:sqQ,answer:sqA.trim().toLowerCase()}:(f.securityQ||null)};
+    const finalF={...f,_setSecurityQ:sqA.trim()?{question:sqQ,answer:sqA.trim()}:undefined};
     if(isNew){
       const s={id:"stu_"+uid(),...finalF,surname:f.surname.trim(),initials:f.initials.trim(),number:f.number.trim(),createdAt:new Date().toISOString()};
       db.setStudents(p=>[...p,s]);
@@ -2069,7 +2049,7 @@ function AddAdminModal({db,onClose,showToast}){
     if(f.password!==f.conf)return setErr("Passwords do not match.");
     if(f.password.length<6)return setErr("Min 6 chars.");
     if(db.admins.find(a=>a.username===f.username.trim()))return setErr("Username taken.");
-    db.setAdmins(p=>[...p,{id:"adm_"+uid(),name:f.name.trim(),username:f.username.trim(),email:f.email.trim(),password:f.password,securityQ:{question:SECURITY_QUESTIONS[0],answer:""},createdAt:new Date().toISOString()}]);
+    db.setAdmins(p=>[...p,{id:"adm_"+uid(),name:f.name.trim(),username:f.username.trim(),email:f.email.trim(),_setPassword:f.password,createdAt:new Date().toISOString()}]);
     showToast("Admin added.");onClose();
   };
   return(
@@ -2125,8 +2105,8 @@ function SupFormModal({db,existing,onClose,showToast}){
     if(f.password&&f.password!==f.conf)return setErr("Passwords do not match.");
     if(f.password&&f.password.length<6)return setErr("Min 6 chars.");
     if(db.supervisors.find(s=>s.username===f.username.trim()&&s.id!==existing?.id))return setErr("Username taken.");
-    if(isNew){ db.setSupervisors(p=>[...p,{id:"sup_"+uid(),name:f.name.trim(),username:f.username.trim(),email:f.email.trim(),password:f.password,securityQ:{question:SECURITY_QUESTIONS[0],answer:""},createdAt:new Date().toISOString()}]); }
-    else { db.setSupervisors(prev=>prev.map(s=>s.id===existing.id?{...s,name:f.name.trim(),username:f.username.trim(),email:f.email.trim(),...(f.password?{password:f.password}:{})}:s)); }
+    if(isNew){ db.setSupervisors(p=>[...p,{id:"sup_"+uid(),name:f.name.trim(),username:f.username.trim(),email:f.email.trim(),_setPassword:f.password,createdAt:new Date().toISOString()}]); }
+    else { db.setSupervisors(prev=>prev.map(s=>s.id===existing.id?{...s,name:f.name.trim(),username:f.username.trim(),email:f.email.trim(),...(f.password?{_setPassword:f.password}:{})}:s)); }
     showToast(isNew?"Supervisor added.":"Supervisor updated.");onClose();
   };
   return(
@@ -2452,6 +2432,7 @@ function AccountSettings({role,db,session,showToast}){
   const[pwd,setPwd]=useState({old:"",n1:"",n2:""});
   const[sq,setSq]=useState({q:me.securityQ?.question||SECURITY_QUESTIONS[0],a:""});
   const[errs,setErrs]=useState({});
+  const[busy,setBusy]=useState(false);
   const set=role==="admin"?db.setAdmins:db.setSupervisors;
   const all=role==="admin"?db.admins:db.supervisors;
 
@@ -2460,16 +2441,20 @@ function AccountSettings({role,db,session,showToast}){
     set(prev=>prev.map(x=>x.id===session.id?{...x,name:name.trim(),username:username.trim(),email:email.trim()}:x));
     setErrs({});showToast("Profile updated.");
   };
-  const savePwd=()=>{
-    if(pwd.old!==me.password){setErrs({pwd:"Current password incorrect."});return;}
+  const savePwd=async()=>{
     if(pwd.n1.length<6){setErrs({pwd:"Min 6 chars."});return;}
     if(pwd.n1!==pwd.n2){setErrs({pwd:"Passwords do not match."});return;}
-    set(prev=>prev.map(x=>x.id===session.id?{...x,password:pwd.n1}:x));
-    setPwd({old:"",n1:"",n2:""});setErrs({});showToast("Password updated.");
+    setBusy(true);
+    try{
+      await apiPost("/api/login",{role,id:me.username,password:pwd.old}); // verifies current password server-side
+      set(prev=>prev.map(x=>x.id===session.id?{...x,_setPassword:pwd.n1}:x));
+      setPwd({old:"",n1:"",n2:""});setErrs({});showToast("Password updated.");
+    }catch(e){ setErrs({pwd:"Current password incorrect."}); }
+    setBusy(false);
   };
   const saveSQ=()=>{
     if(!sq.a.trim()){setErrs({sq:"Enter answer."});return;}
-    set(prev=>prev.map(x=>x.id===session.id?{...x,securityQ:{question:sq.q,answer:sq.a.trim().toLowerCase()}}:x));
+    set(prev=>prev.map(x=>x.id===session.id?{...x,_setSecurityQ:{question:sq.q,answer:sq.a.trim()}}:x));
     setSq(p=>({...p,a:""}));setErrs({});showToast("Security question updated.");
   };
 
@@ -2643,7 +2628,7 @@ function SupReports({db,myStudents,mySubs}){
 function StudentPortal({db,session,onLogout,showToast}){
   const stu=db.students.find(s=>s.id===session.id)||{};
   const[view,setView]=useState("submit");
-  const[needsSetup,setNeedsSetup]=useState(!stu.password||!stu.securityQ);
+  const[needsSetup,setNeedsSetup]=useState(!stu.hasPassword||!stu.hasSecurityQ);
   const[needsSup,setNeedsSup]=useState(!stu.supervisorId&&!stu.requestedSupervisorId);
   const fileRef=useRef();
   const[file,setFile]=useState(null);const[text,setText]=useState("");
@@ -2787,7 +2772,7 @@ function StudentFirstSetup({stu,db,onDone}){
     if(pwd.length<4)return setErr("Min 4 characters.");
     if(pwd!==conf)return setErr("Passwords do not match.");
     if(!sqA.trim())return setErr("Enter a security answer.");
-    db.setStudents(prev=>prev.map(s=>s.id===stu.id?{...s,password:pwd,securityQ:{question:sqQ,answer:sqA.trim().toLowerCase()}}:s));
+    db.setStudents(prev=>prev.map(s=>s.id===stu.id?{...s,_setPassword:pwd,_setSecurityQ:{question:sqQ,answer:sqA.trim()}}:s));
     onDone();
   };
   return(
@@ -2854,16 +2839,22 @@ function StudentAccountPage({stu,db,showToast}){
   const sup=db.supervisors.find(s=>s.id===stu.supervisorId);
   const reqSup=db.supervisors.find(s=>s.id===stu.requestedSupervisorId);
 
-  const savePwd=()=>{
-    if(pwd.old!==stu.password){setErrs({pwd:"Current password incorrect."});return;}
+  const[busy,setBusy]=useState(false);
+
+  const savePwd=async()=>{
     if(pwd.n1.length<4){setErrs({pwd:"Min 4 chars."});return;}
     if(pwd.n1!==pwd.n2){setErrs({pwd:"Mismatch."});return;}
-    db.setStudents(prev=>prev.map(s=>s.id===stu.id?{...s,password:pwd.n1}:s));
-    setPwd({old:"",n1:"",n2:""});setErrs({});showToast("Password updated.");
+    setBusy(true);
+    try{
+      await apiPost("/api/login",{role:"student",id:stu.number,password:pwd.old}); // verifies current password server-side
+      db.setStudents(prev=>prev.map(s=>s.id===stu.id?{...s,_setPassword:pwd.n1}:s));
+      setPwd({old:"",n1:"",n2:""});setErrs({});showToast("Password updated.");
+    }catch(e){ setErrs({pwd:"Current password incorrect."}); }
+    setBusy(false);
   };
   const saveSQ=()=>{
     if(!sq.a.trim()){setErrs({sq:"Enter answer."});return;}
-    db.setStudents(prev=>prev.map(s=>s.id===stu.id?{...s,securityQ:{question:sq.q,answer:sq.a.trim().toLowerCase()}}:s));
+    db.setStudents(prev=>prev.map(s=>s.id===stu.id?{...s,_setSecurityQ:{question:sq.q,answer:sq.a.trim()}}:s));
     setSq(p=>({...p,a:""}));setErrs({});showToast("Security question updated.");
   };
 
