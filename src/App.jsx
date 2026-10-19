@@ -44,17 +44,22 @@ const uid = () => Math.random().toString(36).slice(2);
 
 // useFirebase — synced state for a collection, backed by /api/db (requires an
 // active session token; returns empty/not-ready until one is available).
+// Set by <App/> so background save failures can be shown to the user instead of vanishing silently.
+let saveErrorHandler = null;
+
 function useFirebase(collection, token) {
   const [data, setData] = useState([]);
   const [ready, setReady] = useState(false);
   const dataRef = useRef([]);
   dataRef.current = data;
+  const pendingWrites = useRef(0);
 
   const fetchList = useCallback(async () => {
     if (!token) return;
     try {
       const { records } = await apiPost("/api/db", { action: "list", collection }, token);
-      setData(records || []);
+      // Don't let a refresh that started before a save finished overwrite the optimistic data.
+      if (pendingWrites.current === 0) setData(records || []);
     } catch (e) {
       console.error(`Failed to load ${collection}:`, e.message);
     } finally {
@@ -84,10 +89,16 @@ function useFirebase(collection, token) {
 
     setData(next); // optimistic local update
     if (upserts.length || deletes.length) {
-      apiPost("/api/db", { action: "write", collection, upserts, deletes }, token).catch(e => {
-        console.error(`Failed to save ${collection}:`, e.message);
-        fetchList(); // resync with server on failure
-      });
+      pendingWrites.current++;
+      apiPost("/api/db", { action: "write", collection, upserts, deletes }, token)
+        .catch(e => {
+          console.error(`Failed to save ${collection}:`, e.message);
+          if (saveErrorHandler) saveErrorHandler(`Could not save to the database: ${e.message}`);
+        })
+        .finally(() => {
+          pendingWrites.current--;
+          fetchList(); // resync with the server (shows the true state, incl. after a failure)
+        });
     }
   }, [collection, token, fetchList]);
 
@@ -127,7 +138,13 @@ async function callClaudeAPI(prompt, system, maxTokens = 4000) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ prompt, system, maxTokens }),
   });
-  if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(e.error || "Server error " + r.status); }
+  if (!r.ok) {
+    const e = await r.json().catch(() => ({}));
+    if (!e.error && (r.status === 504 || r.status === 502 || r.status === 503)) {
+      throw new Error("The analysis took too long and the server stopped it. Please try again — if it keeps happening, submit fewer chapters at a time or use Standard Analysis instead of Extended Review.");
+    }
+    throw new Error(e.error || "Server error " + r.status);
+  }
   const d = await r.json();
   return (d.text || "").replace(/```json|```/g, "").trim();
 }
@@ -520,6 +537,7 @@ export default function App() {
 
   const ready = !session || (adminsReady && supervisorsReady && studentsReady && submissionsReady);
   const showToast = (msg, type="success") => setToast({msg, type});
+  saveErrorHandler = (msg) => setToast({msg, type:"error"});
 
   const login = (sessionData) => {
     setSession(sessionData);
