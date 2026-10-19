@@ -617,10 +617,10 @@ function Ic({n,size=18,c="currentColor"}){
   return React.createElement("svg",{width:size,height:size,viewBox:"0 0 24 24",fill:"none",stroke:c,strokeWidth:"2",strokeLinecap:"round",strokeLinejoin:"round",dangerouslySetInnerHTML:{__html:paths[n]||""}});
 }
 
-function PwdInput({value,onChange,placeholder,onEnter}){
+function PwdInput({value,onChange,placeholder,onEnter,autoComplete}){
   const[show,setShow]=useState(false);
   return React.createElement("div",{style:{position:"relative"}},
-    React.createElement("input",{type:show?"text":"password",value,onChange,placeholder:placeholder||"Password",onKeyDown:e=>e.key==="Enter"&&onEnter&&onEnter(),style:{...IS,paddingRight:40}}),
+    React.createElement("input",{type:show?"text":"password",value,onChange,placeholder:placeholder||"Password",autoComplete,onKeyDown:e=>e.key==="Enter"&&onEnter&&onEnter(),style:{...IS,paddingRight:40}}),
     React.createElement("button",{type:"button",onClick:()=>setShow(s=>!s),style:{position:"absolute",right:10,top:"50%",transform:"translateY(-50%)",background:"none",border:"none",cursor:"pointer",color:"#94a3b8",padding:2}},
       React.createElement(Ic,{n:show?"eyeoff":"eye",size:16}))
   );
@@ -878,7 +878,7 @@ function FieldSelector({selected,onChange}){
     <div>
       {selected.length>0&&<div style={{display:"flex",flexWrap:"wrap",gap:5,marginBottom:6}}>{selected.map(f=><span key={f} style={{background:"#dbeafe",color:"#1e40af",padding:"2px 8px",borderRadius:99,fontSize:12,fontWeight:600,display:"flex",alignItems:"center",gap:3}}>{f}<button onClick={()=>toggle(f)} style={{background:"none",border:"none",cursor:"pointer",color:"#3b82f6",padding:0,lineHeight:1,fontSize:14}}>×</button></span>)}</div>}
       <div style={{position:"relative"}}>
-        <input value={search} onChange={e=>{setSearch(e.target.value);setOpen(true);}} onFocus={()=>setOpen(true)} placeholder="Search engineering fields…" style={IS}/>
+        <input value={search} onChange={e=>{setSearch(e.target.value);setOpen(true);}} onFocus={()=>setOpen(true)} placeholder="Search engineering fields…" autoComplete="off" name="field-search" style={IS}/>
         {open&&<div style={{position:"absolute",top:"100%",left:0,right:0,background:"white",border:"1px solid #e2e8f0",borderRadius:10,maxHeight:170,overflow:"auto",zIndex:100,boxShadow:"0 8px 24px rgba(0,0,0,.1)"}}>
           {filtered.map(f=><div key={f} onClick={()=>{toggle(f);setSearch("");}} style={{padding:"7px 11px",cursor:"pointer",display:"flex",alignItems:"center",gap:7,background:selected.includes(f)?"#eff6ff":"white",borderBottom:"1px solid #f8fafc",fontSize:13}}>
             <div style={{width:14,height:14,borderRadius:3,border:`2px solid ${selected.includes(f)?"#3b82f6":"#cbd5e1"}`,background:selected.includes(f)?"#3b82f6":"white",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}>{selected.includes(f)&&<Ic n="check" size={8} c="white"/>}</div>{f}
@@ -925,7 +925,8 @@ function StudentFormModal({db,existing,supervisorId,onClose,showToast}){
     if(f.fields.length===0)return setErr("Select at least one field.");
     const dup=db.students.find(s=>s.number===f.number.trim()&&s.id!==existing?.id);
     if(dup)return setErr("Student number already registered.");
-    const finalF={...f,_setSecurityQ:sqA.trim()?{question:sqQ,answer:sqA.trim()}:undefined};
+    const {password:newPw,securityQ:_ignoredSq,...fRest}=f;
+    const finalF={...fRest,_setPassword:newPw&&newPw.trim()?newPw.trim():undefined,_setSecurityQ:sqA.trim()?{question:sqQ,answer:sqA.trim()}:undefined};
     if(isNew){
       const s={id:"stu_"+uid(),...finalF,surname:f.surname.trim(),initials:f.initials.trim(),number:f.number.trim(),createdAt:new Date().toISOString()};
       db.setStudents(p=>[...p,s]);
@@ -995,14 +996,14 @@ function StudentFormModal({db,existing,supervisorId,onClose,showToast}){
       </div>
       <div style={{marginBottom:10}}>
         <label style={LS}>{isNew?"Initial Password (optional — student sets on first login)":"Reset Password (leave blank to keep)"}</label>
-        <PwdInput value={f.password} onChange={up("password")} placeholder={isNew?"Student sets on first login":"Leave blank to keep"}/>
+        <PwdInput value={f.password||""} onChange={up("password")} autoComplete="new-password" placeholder={isNew?"Student sets on first login":"Leave blank to keep"}/>
       </div>
       <div style={{background:"#f8fafc",borderRadius:9,padding:"10px 12px",marginBottom:10}}>
         <label style={LS}>Security Question for Password Reset</label>
         {f.securityQ&&<div style={{fontSize:12,color:"#64748b",marginBottom:5}}>Current: <em>{f.securityQ.question}</em></div>}
         <select value={sqQ} onChange={e=>setSqQ(e.target.value)} style={{...IS,marginBottom:6}}>{SECURITY_QUESTIONS.map(q=><option key={q}>{q}</option>)}</select>
         <label style={LS}>Answer {f.securityQ?"(leave blank to keep)":"*"}</label>
-        <input value={sqA} onChange={e=>setSqA(e.target.value)} placeholder="Case-insensitive" style={IS}/>
+        <input value={sqA} onChange={e=>setSqA(e.target.value)} placeholder="Case-insensitive" autoComplete="off" name="security-answer" style={IS}/>
       </div>
       <div style={{marginBottom:9}}>
         <label style={LS}>Assessment Rubric (optional)</label>

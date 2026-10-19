@@ -30,8 +30,11 @@ function canWrite(session, collection, record) {
 
 // Who's allowed to set a NEW password/security-question on a record: an admin
 // (resetting/creating anyone), or the person themselves (self-service change).
-function canSetCredentials(session, record) {
-  return session.role === "admin" || record.id === session.id;
+// Supervisors may also set a security question / reset the password of a STUDENT
+// (they register students), but never of other supervisors or admins.
+function canSetCredentials(session, collection, record) {
+  if (session.role === "admin" || record.id === session.id) return true;
+  return session.role === "supervisor" && collection === "students";
 }
 
 function canDelete(session) {
@@ -84,11 +87,11 @@ export default postHandler(async (req, res) => {
         if (existing?.securityQ !== undefined) clean.securityQ = existing.securityQ;
 
         if (_setPassword) {
-          if (!canSetCredentials(session, record)) return res.status(403).json({ error: "Not authorised to set this password." });
+          if (!canSetCredentials(session, collection, record)) return res.status(403).json({ error: "Not authorised to set this password." });
           clean.password = hash(_setPassword);
         }
         if (_setSecurityQ?.question && _setSecurityQ?.answer) {
-          if (!canSetCredentials(session, record)) return res.status(403).json({ error: "Not authorised to set this security question." });
+          if (!canSetCredentials(session, collection, record)) return res.status(403).json({ error: "Not authorised to set this security question." });
           clean.securityQ = { question: _setSecurityQ.question, answer: hash(String(_setSecurityQ.answer).trim().toLowerCase()) };
         }
       }
