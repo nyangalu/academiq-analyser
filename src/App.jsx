@@ -132,7 +132,10 @@ function chunkText(text, size = CHUNK_SIZE, overlap = CHUNK_OVERLAP, maxChunks =
   return chunks;
 }
 
-async function callClaudeAPI(prompt, system, maxTokens = 4000) {
+const TIMEOUT_MSG = "The analysis took too long and the server stopped it. Please try again — if it keeps happening, submit fewer chapters at a time or use Standard Analysis instead of Extended Review.";
+const STREAM_ERROR_MARKER = "\n<<<ANALYSE_ERROR>>>";
+
+async function callClaudeAPIOnce(prompt, system, maxTokens) {
   const r = await fetch("/api/analyse", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -141,12 +144,49 @@ async function callClaudeAPI(prompt, system, maxTokens = 4000) {
   if (!r.ok) {
     const e = await r.json().catch(() => ({}));
     if (!e.error && (r.status === 504 || r.status === 502 || r.status === 503)) {
-      throw new Error("The analysis took too long and the server stopped it. Please try again — if it keeps happening, submit fewer chapters at a time or use Standard Analysis instead of Extended Review.");
+      const err = new Error(TIMEOUT_MSG); err.retryable = true; throw err;
     }
-    throw new Error(e.error || "Server error " + r.status);
+    const err = new Error(e.error || "Server error " + r.status);
+    err.retryable = r.status === 429 || r.status === 529 || /overloaded|rate.?limit/i.test(e.error || "");
+    throw err;
   }
-  const d = await r.json();
-  return (d.text || "").replace(/```json|```/g, "").trim();
+  // The server streams plain text. (Older deployments returned {text} JSON — handle both.)
+  const body = await r.text();
+  const errAt = body.indexOf(STREAM_ERROR_MARKER);
+  if (errAt !== -1) {
+    const err = new Error(body.slice(errAt + STREAM_ERROR_MARKER.length) || "The AI service stopped part-way through.");
+    err.retryable = true; throw err;
+  }
+  let text = body;
+  if ((r.headers.get("content-type") || "").includes("application/json")) {
+    try { text = JSON.parse(body).text || ""; } catch (e) {}
+  }
+  return text.replace(/```json|```/g, "").trim();
+}
+
+// One automatic retry for timeouts / overloads before giving up.
+async function callClaudeAPI(prompt, system, maxTokens = 4000) {
+  try {
+    return await callClaudeAPIOnce(prompt, system, maxTokens);
+  } catch (e) {
+    if (!e.retryable) throw e;
+    await new Promise(res => setTimeout(res, 3000));
+    return await callClaudeAPIOnce(prompt, system, maxTokens);
+  }
+}
+
+// Runs async tasks with a cap on how many are in flight at once, preserving order.
+async function mapWithConcurrency(items, limit, fn) {
+  const out = new Array(items.length);
+  let next = 0;
+  const worker = async () => {
+    while (next < items.length) {
+      const i = next++;
+      out[i] = await fn(items[i], i);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return out;
 }
 
 // Structurally repairs truncated/malformed JSON by tracking open braces/brackets/strings
@@ -314,8 +354,8 @@ ${chunk}
 
 Return ONLY valid JSON summarising this fragment. Keep it concise — at most 5 items in each list (pick the most significant), and keep each list item to one short sentence, so the whole response stays compact:
 {"likelySection":"<Introduction|Literature Review|Methodology|Results|Discussion|Conclusion|References|Appendix|Mixed/Unclear>","summary":"<3-4 sentence factual summary of what this fragment covers>","strengths":["<specific strength, one short sentence, max 5 items>"],"weaknesses":["<specific weakness/issue, one short sentence, max 5 items>"],"notableCitations":["<citation exactly as it appears, max 5 items, omit if none>"],"languageNotes":["<spelling/grammar/style issue with a short snippet, max 5 items, omit if none>"]}`;
-  const raw = await callClaudeAPI(prompt, "You are a meticulous academic reviewer producing structured notes on one fragment of a larger document. Return only JSON. Be concise.", 2200);
   try {
+    const raw = await callClaudeAPI(prompt, "You are a meticulous academic reviewer producing structured notes on one fragment of a larger document. Return only JSON. Be concise.", 2200);
     return parseJsonLoose(raw, `Could not process section ${index + 1} of ${total}.`);
   } catch (e) {
     // Degrade gracefully — one unparsable fragment shouldn't abort the whole submission.
@@ -460,29 +500,32 @@ async function analyzeSubmission(text, student, supNotes, opts = {}) {
   const report = txt => onProgress?.(txt);
 
   if (text.length <= SINGLE_PASS_LIMIT) {
-    report(extended ? "Analysing…" : "Analysing…");
-    const result = await analyzeDocSingle(text, student, supNotes, docContext);
-    let extendedResult = null;
-    if (extended) {
-      report("Running extended review…");
-      extendedResult = await analyzeDocExtendedSingle(text, student, citationStyle, supNotes, docContext);
-    }
+    report(extended ? "Analysing and running extended review…" : "Analysing…");
+    // Standard and extended reviews are independent — run them side by side.
+    const [result, extendedResult] = await Promise.all([
+      analyzeDocSingle(text, student, supNotes, docContext),
+      extended ? analyzeDocExtendedSingle(text, student, citationStyle, supNotes, docContext) : Promise.resolve(null),
+    ]);
     return { result, extendedResult, chunked: false, chunksUsed: 1, charsAnalysed: text.length, totalChars: text.length };
   }
 
   const chunks = chunkText(text);
-  const chunkSummaries = [];
-  for (let i = 0; i < chunks.length; i++) {
-    report(`Analysing section ${i + 1} of ${chunks.length}…`);
-    chunkSummaries.push(await mapChunkSummary(chunks[i], i, chunks.length, student, docContext));
+  let done = 0;
+  report(`Analysing ${chunks.length} sections…`);
+  const chunkSummaries = await mapWithConcurrency(chunks, 4, async (chunk, i) => {
+    const s = await mapChunkSummary(chunk, i, chunks.length, student, docContext);
+    done++;
+    report(`Analysed ${done} of ${chunks.length} sections…`);
+    return s;
+  });
+  if (chunkSummaries.every(c => c._failed)) {
+    throw new Error("None of the document sections could be analysed. Please try again in a few minutes.");
   }
-  report("Synthesising full report…");
-  const result = await reduceStandardFromChunks(chunkSummaries, student, supNotes, docContext);
-  let extendedResult = null;
-  if (extended) {
-    report("Synthesising extended review…");
-    extendedResult = await reduceExtendedFromChunks(chunkSummaries, student, citationStyle, supNotes, docContext);
-  }
+  report(extended ? "Synthesising full report and extended review…" : "Synthesising full report…");
+  const [result, extendedResult] = await Promise.all([
+    reduceStandardFromChunks(chunkSummaries, student, supNotes, docContext),
+    extended ? reduceExtendedFromChunks(chunkSummaries, student, citationStyle, supNotes, docContext) : Promise.resolve(null),
+  ]);
   const charsAnalysed = CHUNK_SIZE + (chunks.length - 1) * (CHUNK_SIZE - CHUNK_OVERLAP);
   const chunksFailed = chunkSummaries.filter(c => c._failed).length;
   return { result, extendedResult, chunked: true, chunksUsed: chunks.length, chunksFailed, charsAnalysed: Math.min(charsAnalysed, text.length), totalChars: text.length };
